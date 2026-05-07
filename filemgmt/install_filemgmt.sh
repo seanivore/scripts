@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Installer for frdoc — copies frdoc.sh to ~/bin/frdoc and makes it executable.
+# Installer for filemgmt — copies filemgmt.sh to ~/bin/filemgmt and makes it executable.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE="${SCRIPT_DIR}/frdoc.sh"
-TARGET="${HOME}/bin/frdoc"
+SOURCE="${SCRIPT_DIR}/filemgmt.sh"
+TARGET="${HOME}/bin/filemgmt"
 
 if [[ ! -f "$SOURCE" ]]; then
-  echo "install_frdoc: source not found: $SOURCE" >&2
+  echo "install_filemgmt: source not found: $SOURCE" >&2
   exit 1
 fi
 
@@ -22,7 +22,7 @@ echo ""
 # PATH check
 case ":$PATH:" in
   *":$HOME/bin:"*)
-    echo "✓ ~/bin is on your PATH. Run 'frdoc -h' from anywhere."
+    echo "✓ ~/bin is on your PATH. Run 'filemgmt -h' from anywhere."
     ;;
   *)
     echo "⚠ ~/bin is not on your PATH."

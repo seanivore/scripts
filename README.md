@@ -12,9 +12,9 @@ This directory contains various development tools and utilities organized by cat
 ├── project_tree/           # Enhanced project structure viewer
 │   ├── ptree.sh           # Main ptree script
 │   └── install_ptree_command.sh
-├── frdoc/                  # Find-and-replace doc syncer across projects
-│   ├── frdoc.sh           # Main frdoc script
-│   └── install_frdoc_command.sh
+├── filemgmt/               # Bulk Directory File Management
+│   ├── filemgmt.sh        # Main filemgmt script
+│   └── install_filemgmt.sh
 └── README.md              # This file
 ```
 
@@ -81,33 +81,33 @@ ptree -h        # Help
 - Highlights development directories (`.claude`, `.cursor`, etc.)
 - Excludes noise (`node_modules`, `.git`, cache dirs)
 
-#### frdoc - Find and Replace Doc
-Sync a canonical document across many project directories. Useful for keeping `.agent/DEV_RULES.md`, `BRAND.md`, or any other shared resource doc in sync from a single source.
+#### filemgmt - Bulk Directory File Management
+Find and replace, or add, canonical resource documents across project directories. Extremely useful for keeping `.agent/DEV_RULES.md`, `BRAND.md`, or any other shared resource doc in sync from a single source.
 
 **Installation:**
 ```bash
 cd ~/Development/scripts/frdoc
-./install_frdoc_command.sh
+./install_filemgmt.sh
 ```
 
 **Usage:**
 ```bash
-# Sync DEV_RULES.md from thot out to every project under ~/Development:
-frdoc -n ~/Development/thot/.agent/DEV_RULES.md \
-      -s ~/Development \
-      -r .agent/DEV_RULES.md
+# Add a new file to all .agent directories:
+filemgmt -f ~/Development/*/.agent -a ~/Development/thot/.agent/RESEARCH_PROTOCOL.md
 
-frdoc                       # Interactive walkthrough
-frdoc -d ...                # Dry run (preview matches, no writes)
-frdoc -y ...                # Skip confirmation prompt
-frdoc -h                    # Help
+# Replace DEV_RULES.md everywhere it's found inside ~/Development:
+filemgmt -f ~/Development -r ~/Development/thot/.agent/DEV_RULES.md
+
+filemgmt -d ...                # Dry run (preview matches, no writes)
+filemgmt -y ...                # Skip confirmation prompt
+filemgmt -h                    # Help
 ```
 
 **Behavior:**
-- Recursively searches `-s` for files whose path ends with `-r` (suffix match).
-- Skips `.git`, `node_modules`, `dist`, `build`, `.next`, `.venv`.
-- Skips the canonical source itself if encountered.
-- Confirms before overwriting (use `-y` for non-interactive).
+- Collects multiple directories if bash globbing is used (e.g. `*` or `**`).
+- With `-r` (replace): Searches target directories and overwrites existing files. If the target directory name matches the canonical file's parent folder (e.g., `.agent`), it will implicitly add the file if it's missing!
+- With `-a` (add): Adds the canonical file into every target directory specified.
+- Checks paths for typos (like `~User/...`) and provides help.
 - Relies on git for safety — no internal backups.
 
 ## Adding New Tools
