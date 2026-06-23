@@ -15,6 +15,12 @@ This directory contains various development tools and utilities organized by cat
 ├── filemgmt/               # Bulk Directory File Management
 │   ├── filemgmt.sh        # Main filemgmt script
 │   └── install_filemgmt.sh
+├── gate/                   # Gap-review courier engine (TypeScript; spawns claude -p peers)
+│   ├── src/gate.ts        # The courier loop
+│   ├── src/claude.ts      # claude -p wrapper (Max subscription)
+│   ├── config.ts          # Angle + per-node model/effort
+│   ├── templates/         # review-prompt.md (the externalized method)
+│   └── README.md
 └── README.md              # This file
 ```
 
@@ -109,6 +115,21 @@ filemgmt -h                    # Help
 - With `-a` (add): Adds the canonical file into every target directory specified.
 - Checks paths for typos (like `~User/...`) and provides help.
 - Relies on git for safety — no internal backups.
+
+#### gate - Gap-Review Courier Engine
+Automates the DEV_RULES §*The Gap-Review Gate* loop: spawns genuinely-separate **peer** `claude -p` reviewers (A cold/no-repo, B/C/D repo — never subagents) on the **Max subscription**, couriers prompts + findings to/from the Build-Guide orchestrator, and loops until every angle verdicts READY — pausing only when a finding needs a human decision. The method lives as editable data (`templates/review-prompt.md` + `config.ts`); the script is plumbing. See `gate/README.md`.
+
+**Install:** the launcher is `~/bin/gate` (a bash shim that runs the TS engine via `tsx`). Requires `node` 22+ and `tsx`.
+
+**Usage:**
+```bash
+# run from INSIDE the target repo:
+gate docs/archive/v1_0/v1_0_3_IMPLEMENT.md             # all angles
+gate <IMPLEMENT-path> --phase A                         # cold / no-repo only
+gate <IMPLEMENT-path> --phase BCD --max-rounds 8
+```
+
+**Status:** first cut — foundation smoke-tested (node → `claude -p` on the subscription); end-to-end pilot pending (gate the tool on itself, then a live IMPLEMENT).
 
 ## Adding New Tools
 

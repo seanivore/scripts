@@ -1,0 +1,9 @@
+{
+  "name": "gate",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Gap-review courier engine — orchestrates peer `claude -p` reviewers through the DEV_RULES gate loop.",
+  "bin": { "gate": "src/gate.ts" },
+  "scripts": { "gate": "tsx src/gate.ts" },
+  "devDependencies": { "tsx": "^4.22.4" }
+}
