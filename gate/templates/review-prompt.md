@@ -15,6 +15,11 @@ RULES FOR THE GENERATOR:
   in context). Re-inline it per-block ONLY for a no-shared-context cold-A web paste.
 - Verdict is a TRICHOTOMY everywhere: READY TO BUILD / NEEDS ANOTHER PASS /
   NEEDS ANOTHER PASS (NARROW).
+- MACHINE CONTRACT (the `gate` engine parses this — keep it stable): each angle's
+  reviewer prompt stays in a fenced ``` block DIRECTLY under its `## Angle X —` header;
+  gate extracts that block verbatim and inlines the four core docs above it. Optional
+  explicit <!-- GATE:PROMPT:X --> … <!-- /GATE:PROMPT:X --> markers around the block are
+  honored first. gate derives the docs + versions from the IMPLEMENT path (not this prose).
 - Canonical worked example: everlastings-website/.../v3_2/v3_2_3_REVIEW_PROMPTS.md
 ============================================================================ -->
 

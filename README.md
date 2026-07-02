@@ -15,11 +15,12 @@ This directory contains various development tools and utilities organized by cat
 ├── filemgmt/               # Bulk Directory File Management
 │   ├── filemgmt.sh        # Main filemgmt script
 │   └── install_filemgmt.sh
-├── gate/                   # Gap-review courier engine (TypeScript; spawns claude -p peers)
+├── gate/                   # Gap-review courier engine (TypeScript; Agent SDK peers)
 │   ├── src/gate.ts        # The courier loop
-│   ├── src/claude.ts      # claude -p wrapper (Max subscription)
+│   ├── src/sdk.ts         # Agent SDK peer wrapper (strips key → Max subscription)
+│   ├── src/probe.ts       # Verification gates (auth / compact / isolate / find)
 │   ├── config.ts          # Angle + per-node model/effort
-│   ├── templates/         # review-prompt.md (the externalized method)
+│   ├── templates/         # review-prompt.md + GATE_NOTES.example.md (the method as data)
 │   └── README.md
 └── README.md              # This file
 ```
@@ -117,19 +118,18 @@ filemgmt -h                    # Help
 - Relies on git for safety — no internal backups.
 
 #### gate - Gap-Review Courier Engine
-Automates the DEV_RULES §*The Gap-Review Gate* loop: spawns genuinely-separate **peer** `claude -p` reviewers (A cold/no-repo, B/C/D repo — never subagents) on the **Max subscription**, couriers prompts + findings to/from the Build-Guide orchestrator, and loops until every angle verdicts READY — pausing only when a finding needs a human decision. The method lives as editable data (`templates/review-prompt.md` + `config.ts`); the script is plumbing. See `gate/README.md`.
+Automates the DEV_RULES *Gap-Review Gate* loop: spawns genuinely-separate **peer** Claude reviewers (Agent SDK `query()` processes — A cold/no-repo, B/C/D repo — never subagents) on the **Max subscription**, couriers prompts + findings to/from the resumed Build-Guide orchestrator thread, and loops until every angle verdicts READY — pausing only when a finding needs a human decision. The method lives as editable data (`templates/` + `config.ts`); the script is plumbing. See `gate/README.md`.
 
-**Install:** the launcher is `~/bin/gate` (a bash shim that runs the TS engine via `tsx`). Requires `node` 22+ and `tsx`.
+**Install:** the launcher is `~/bin/gate` (a bash shim that runs the TS engine via the local `tsx`). Requires `node` 22+; the Agent SDK + `tsx` are installed in `gate/`. Auth is the `claude.ai` Max login (no API key).
 
 **Usage:**
 ```bash
-# run from INSIDE the target repo:
-gate docs/archive/v1_0/v1_0_3_IMPLEMENT.md             # all angles
-gate <IMPLEMENT-path> --phase A                         # cold / no-repo only
+gate ~/Development/<repo>/assets/docs/archive/vX_Y/vX_Y_Z_IMPLEMENT.md --phase A
+gate <IMPLEMENT-path> --dry-run                         # resolve + parse + report, no spend
 gate <IMPLEMENT-path> --phase BCD --max-rounds 8
 ```
 
-**Status:** first cut — foundation smoke-tested (node → `claude -p` on the subscription); end-to-end pilot pending (gate the tool on itself, then a live IMPLEMENT).
+**Status:** first cut, foundation **proven** — subscription auth (`claude.ai / max`), `/compact` drivable via the SDK, Angle-A filesystem wall, and orchestrator resume-by-title all verified; `--dry-run` validated on real docs. Supervised live pilot next.
 
 ## Adding New Tools
 

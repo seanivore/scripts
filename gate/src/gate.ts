@@ -1,134 +1,323 @@
 #!/usr/bin/env -S npx tsx
-// gate/src/gate.ts — the gap-review courier loop.
-// FIRST CUT: the foundation (claude.ts) is smoke-tested; this loop is hardened in the Phase 5 pilot.
+// gate/src/gate.ts — the gap-review courier loop, on the Agent SDK.
 //
-//   tsx src/gate.ts <IMPLEMENT-path> [--phase A|BCD|all] [--max-rounds N]   (run from the target repo)
+//   gate <IMPLEMENT-path> [--phase A|BCD|all] [--max-rounds N]
+//        [--orchestrator-title "IMPLEMENT Build Planning Orchestrator"] [--orchestrator-id <uuid>]
+//        [--project-doc <path>]
 //
-// The script is the COURIER + loop control. The agentic work stays with peer `claude -p`:
-//   • ORCHESTRATOR (persistent --resume, repo, xhigh): fills templates/review-prompt.md from the build docs +
-//     DEV_RULES, writes per-angle prompt files + the human-readable REVIEW_PROMPTS.md; later validates +
-//     folds findings, bumps the version, updates the ledger, regenerates prompts, flags DECISIONS for the human.
-//   • REVIEWERS (fresh per pass, never reused, never subagents): A = no repo (temp cwd + no file tools, docs
-//     inlined); B/C/D = repo, read-only. Each returns findings; the engine writes GAP_REVIEW_<angle>.md.
+// The SCRIPT is the dumb, stable courier + loop. The agentic work stays with peer Claudes:
+//   • ORCHESTRATOR — Sean's RESUMED thread (his "IMPLEMENT Build Planning Orchestrator"),
+//     Opus/xhigh, repo access. Validates + folds findings, bumps the version, updates the
+//     ledger, runs the 2 breadth subagents, regenerates REVIEW_PROMPTS, WRITES its own
+//     /compact arg to disk, and flags DECISIONS for the human. Reached via runQuery({resume}).
+//   • REVIEWERS — fresh, separate SDK query() peers (never subagents): A = temp cwd + all file
+//     tools denied (physically no repo; the 4 core docs are inlined); B/C/D = repo cwd, parallel.
+//
+// What gate parses from REVIEW_PROMPTS is ONLY each angle's fenced prompt block (under its
+// `## Angle X` header, or explicit <!-- GATE:PROMPT:X --> markers). Everything else — the four
+// core docs, versions, next angles — is derived from the IMPLEMENT path or the orchestrator's
+// structured control payload. Minimal parsing = maximum format-stability.
 
-import { runClaude } from "./claude.ts";
+import { runQuery, findSessionByTitle } from "./sdk.ts";
 import { ORCHESTRATOR, REVIEWER } from "../config.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as readline from "node:readline/promises";
 
-function extractJson(text: string): any {
-  const m = text.match(/```json\s*([\s\S]*?)```/);          // orchestrator wraps its control payload in a fence
-  try { return JSON.parse((m ? m[1] : text).trim()); } catch { return null; }
+// ── Constants ────────────────────────────────────────────────────────────────
+const HEADLESS = "bypassPermissions" as const;
+const NO_FILE_TOOLS = ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch"]; // A: pure reasoning
+const READONLY = ["Write", "Edit", "NotebookEdit"];                                                   // B/C/D: read, mutate nothing
+const DEFAULT_ORCH_TITLE = "IMPLEMENT Build Planning Orchestrator";
+
+// The orchestrator's fold control payload (structured output → no fragile prose parsing).
+const FOLD_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    version: { type: "string", description: "New version after this fold, e.g. v3_6_1" },
+    archiveDir: { type: "string", description: "Absolute dir where the regenerated docs now live" },
+    reviewPromptsPath: { type: "string", description: "Absolute path to the regenerated REVIEW_PROMPTS.md" },
+    foldedCount: { type: "number" },
+    decisionsNeeded: { type: "array", items: { type: "string" }, description: "Human decisions; empty if none" },
+    compactArg: { type: "string", description: "The self-authored /compact instruction for this round" },
+    nextAngles: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: { key: { type: "string", enum: ["A", "B", "C", "D"] }, repo: { type: "boolean" } },
+        required: ["key", "repo"],
+      },
+      description: "Angles to run NEXT round (scoped/narrowed re-runs only). Empty = gate clear.",
+    },
+    gateStatus: { type: "string", description: "One-line human status summary" },
+  },
+  required: ["version", "reviewPromptsPath", "nextAngles", "compactArg", "decisionsNeeded"],
+} as const;
+
+interface FoldPayload {
+  version: string;
+  archiveDir?: string;
+  reviewPromptsPath: string;
+  foldedCount?: number;
+  decisionsNeeded: string[];
+  compactArg: string;
+  nextAngles: Array<{ key: string; repo: boolean }>;
+  gateStatus?: string;
 }
+
+// ── Small helpers ────────────────────────────────────────────────────────────
+function die(msg: string): never { console.error(`gate: ${msg}`); process.exit(1); }
+
+function arg(flag: string): string | undefined {
+  const i = process.argv.indexOf(flag);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+
 async function ask(q: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const a = await rl.question(q); rl.close(); return a;
+  const a = await rl.question(q);          // blocks indefinitely — no timeout, waits for Sean
+  rl.close();
+  return a;
 }
+
 function verdictOf(text: string): "READY" | "NARROW" | "PASS" {
   if (/NEEDS ANOTHER PASS \(NARROW\)/i.test(text)) return "NARROW";
   if (/READY TO BUILD/i.test(text)) return "READY";
-  return "PASS";
+  return "PASS"; // "NEEDS ANOTHER PASS" or anything without a clear READY
 }
 
-const HEADLESS = "bypassPermissions";                        // non-interactive; access still bounded by allow/disallow
-const NO_FILE_TOOLS = ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch"]; // A: pure reasoning
-const READONLY = ["Write", "Edit", "NotebookEdit"];          // B/C/D: read the repo, mutate nothing
-
-const argv = process.argv.slice(2);
-const implPath = argv[0];
-if (!implPath || implPath.startsWith("--")) {
-  console.error("usage: gate <IMPLEMENT-path> [--phase A|BCD|all] [--max-rounds N]"); process.exit(1);
-}
-const phase = (argv.includes("--phase") ? argv[argv.indexOf("--phase") + 1] : "all") as "A" | "BCD" | "all";
-const maxRounds = argv.includes("--max-rounds") ? Number(argv[argv.indexOf("--max-rounds") + 1]) : 12;
-
-const repoDir = process.cwd();
-const archiveDir = path.dirname(path.resolve(implPath));
-const work = fs.mkdtempSync(path.join(os.tmpdir(), "gate-"));
-const gateSrc = path.dirname(new URL(import.meta.url).pathname);
-const templatePath = path.join(gateSrc, "..", "templates", "review-prompt.md");
-
-function orchestratorPrompt(task: string): string {
-  return [
-    "You are the Build-Guide Planning Orchestrator for the gap-review gate (DEV_RULES v4.1.0 §The Gap-Review Gate).",
-    `Build under review: ${path.resolve(implPath)} (+ its same-version addenda). Template: ${templatePath}.`,
-    "Read DEV_RULES, the IMPLEMENT + addenda, and the template before acting.",
-    task,
-    "Return ONE ```json fenced block as your control payload (write any files it describes). Be terse outside the JSON.",
-  ].join("\n\n");
+// Walk up from a path to the nearest ancestor containing .git — the repo root.
+function gitRoot(startDir: string): string {
+  let dir = startDir;
+  for (;;) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    const up = path.dirname(dir);
+    if (up === dir) die(`no .git found above ${startDir} — is the IMPLEMENT inside a repo?`);
+    dir = up;
+  }
 }
 
-// 1) Generate the prompts for this phase.
-let orch = await runClaude({
-  ...ORCHESTRATOR, cwd: repoDir, permissionMode: HEADLESS,
-  prompt: orchestratorPrompt(
-    `Generate the gap-review prompts for phase "${phase}". Fill the template from the build docs + DEV_RULES. ` +
-    `Write the human-readable REVIEW_PROMPTS.md into ${archiveDir} (versioned), AND one fully self-contained prompt ` +
-    `file per active angle into ${work} (prompt_<ANGLE>.txt; for angle A inline ALL docs — A gets no repo). ` +
-    `JSON: { "version":"vX_Y_Z", "angles":[ {"key":"A","promptFile":"<abs>","repo":false}, ... ] }`
-  ),
-});
-let status = extractJson(orch.result);
-const orchSession = orch.sessionId;
-if (!status?.angles?.length) { console.error("orchestrator returned no angle prompts:\n", orch.result.slice(0, 1500)); process.exit(1); }
-console.log(`▶ ${status.version}: prompts generated for [${status.angles.map((a: any) => a.key).join(", ")}]`);
+// Extract one angle's reviewer prompt from a REVIEW_PROMPTS.md.
+// Prefer explicit <!-- GATE:PROMPT:X --> ... <!-- /GATE:PROMPT:X --> markers; otherwise fall
+// back to the stable convention: the first fenced ``` block under the `## Angle X` header.
+function extractAnglePrompt(md: string, key: string): string | undefined {
+  const marker = new RegExp(`<!--\\s*GATE:PROMPT:${key}\\s*-->([\\s\\S]*?)<!--\\s*/GATE:PROMPT:${key}\\s*-->`, "i");
+  const mk = md.match(marker);
+  const region = mk ? mk[1] : sliceUnderHeader(md, key);
+  if (!region) return undefined;
+  const fence = region.match(/```[a-z]*\s*\n([\s\S]*?)```/i);
+  return (fence ? fence[1] : region).trim() || undefined;
+}
+function sliceUnderHeader(md: string, key: string): string | undefined {
+  // from "## Angle X" to the next "## " (or EOF)
+  const hdr = new RegExp(`^##\\s*Angle\\s*${key}\\b.*$`, "im");
+  const m = hdr.exec(md);
+  if (!m) return undefined;
+  const start = m.index + m[0].length;
+  const nextHdr = /^##\s/m;
+  nextHdr.lastIndex = 0;
+  const rest = md.slice(start);
+  const nx = rest.search(/^##\s/m);
+  return nx >= 0 ? rest.slice(0, nx) : rest;
+}
 
-// 2) The round loop.
+// Resolve the four core docs from the IMPLEMENT path + the project doc. Validates existence.
+function resolveCoreDocs(implPath: string, repoRoot: string): { label: string; path: string }[] {
+  const base = path.basename(implPath);
+  const m = base.match(/^(v\d+_\d+_\d+)_IMPLEMENT\.md$/i);
+  if (!m) die(`IMPLEMENT filename must look like vX_Y_Z_IMPLEMENT.md (got ${base})`);
+  const ver = m[1];
+  const dir = path.dirname(implPath);
+  const sib = (suffix: string) => path.join(dir, `${ver}_${suffix}`);
+
+  const projectDoc = arg("--project-doc") ?? projectDocFromNotes(repoRoot) ?? guessProjectDoc(repoRoot);
+  if (!projectDoc) die("could not find the project doc — pass --project-doc <path> or add `project_doc:` to .agent/GATE_NOTES.md");
+
+  const docs = [
+    { label: "IMPLEMENT", path: implPath },
+    { label: "ADDENDUM_TESTING", path: sib("ADDENDUM_TESTING.md") },
+    { label: "ADDENDUM_DESIGN", path: sib("ADDENDUM_DESIGN.md") },
+    { label: "PROJECT_DOC", path: path.resolve(repoRoot, projectDoc) },
+  ];
+  const missing = docs.filter((d) => !fs.existsSync(d.path));
+  if (missing.length) die(`core docs missing — will not review blind:\n${missing.map((d) => `  ${d.label}: ${d.path}`).join("\n")}`);
+  return docs;
+}
+
+function projectDocFromNotes(repoRoot: string): string | undefined {
+  const notes = path.join(repoRoot, ".agent", "GATE_NOTES.md");
+  if (!fs.existsSync(notes)) return undefined;
+  const m = fs.readFileSync(notes, "utf8").match(/^project_doc:\s*(\S+)\s*$/im);
+  return m?.[1];
+}
+function guessProjectDoc(repoRoot: string): string | undefined {
+  const dir = path.join(repoRoot, "assets", "docs");
+  if (!fs.existsSync(dir)) return undefined;
+  const hit = fs.readdirSync(dir).find((f) => /_STORE\.md$/i.test(f));
+  return hit ? path.join("assets", "docs", hit) : undefined;
+}
+
+// Inline the core docs at the top of a reviewer prompt (required for A — no repo; a guarantee
+// for B/C/D that EVERLASTINGS_STORE.md et al. are actually in context, never just referenced).
+function withCoreDocs(coreDocs: { label: string; path: string }[], anglePrompt: string): string {
+  const inlined = coreDocs
+    .map((d) => `===== BEGIN ${d.label} (${path.basename(d.path)}) =====\n${fs.readFileSync(d.path, "utf8")}\n===== END ${d.label} =====`)
+    .join("\n\n");
+  return `CORE DOCUMENTS — read in full, do not ration tokens. These are the build under review:\n\n${inlined}\n\n---\n\n${anglePrompt}`;
+}
+
+// ── Spawn one reviewer (a fresh, separate peer) ──────────────────────────────
+async function runReviewer(a: { key: string; repo: boolean }, prompt: string, repoRoot: string): Promise<string> {
+  const work = a.repo ? repoRoot : fs.mkdtempSync(path.join(os.tmpdir(), `gate-${a.key}-`));
+  const r = await runQuery({
+    prompt,
+    model: REVIEWER.model,
+    effort: REVIEWER.effort,
+    cwd: work,                                      // A runs in a throwaway dir → physically no repo
+    disallowedTools: a.repo ? READONLY : NO_FILE_TOOLS,
+    permissionMode: HEADLESS,
+    systemPromptPreset: true,                       // good tool-use behavior for B/C/D
+  });
+  return r.result;
+}
+
+// ── The run ──────────────────────────────────────────────────────────────────
+const implPath = process.argv[2];
+if (!implPath || implPath.startsWith("--")) die("usage: gate <IMPLEMENT-path> [--phase A|BCD|all] [--max-rounds N]");
+const implAbs = path.resolve(implPath);
+if (!fs.existsSync(implAbs)) die(`IMPLEMENT not found: ${implAbs}`);
+
+const phase = (arg("--phase") ?? "all") as "A" | "BCD" | "all";
+const maxRounds = Number(arg("--max-rounds") ?? 12);
+const orchTitle = arg("--orchestrator-title") ?? DEFAULT_ORCH_TITLE;
+const dryRun = process.argv.includes("--dry-run"); // resolve + parse + report, spawn nothing
+
+const repoRoot = gitRoot(path.dirname(implAbs));
+let archiveDir = path.dirname(implAbs);
+let coreDocs = resolveCoreDocs(implAbs, repoRoot);
+let reviewPromptsPath = path.join(archiveDir, path.basename(implAbs).replace(/_IMPLEMENT\.md$/i, "_REVIEW_PROMPTS.md"));
+if (!fs.existsSync(reviewPromptsPath)) die(`REVIEW_PROMPTS not found next to the IMPLEMENT: ${reviewPromptsPath}`);
+
+// Discover Sean's orchestrator thread (needed to fold). Resolve up front so we fail early.
+let orchSession = arg("--orchestrator-id");
+if (!orchSession) {
+  const hit = await findSessionByTitle(repoRoot, orchTitle);
+  if (hit) { orchSession = hit.sessionId; console.log(`▶ orchestrator thread: "${hit.customTitle ?? hit.summary}" (${hit.sessionId})`); }
+  else console.warn(`⚠ no session titled "${orchTitle}" under ${repoRoot} — round 1 reviewers can run, but folding needs it (pass --orchestrator-id <uuid>).`);
+}
+
+// Which angles to run this round. Round 1 comes from --phase; later rounds from the fold payload.
+let active: Array<{ key: string; repo: boolean }> =
+  phase === "A" ? [{ key: "A", repo: false }]
+  : phase === "BCD" ? [{ key: "B", repo: true }, { key: "C", repo: true }, { key: "D", repo: true }]
+  : [{ key: "A", repo: false }]; // "all" starts at A, transitions to BCD when A closes (pilot-harden)
+
+console.log(`▶ ${path.basename(implAbs)} — phase ${phase}, repo ${repoRoot}`);
+
+if (dryRun) {
+  console.log(`\n=== DRY RUN (nothing spawned, no spend) ===`);
+  console.log(`repo root         : ${repoRoot}`);
+  console.log(`archive dir       : ${archiveDir}`);
+  console.log(`REVIEW_PROMPTS    : ${path.basename(reviewPromptsPath)}`);
+  console.log(`orchestrator      : ${orchSession ?? "(not found — folding would need --orchestrator-id)"}`);
+  console.log(`core docs (inlined every prompt):`);
+  let total = 0;
+  for (const d of coreDocs) { const kb = fs.statSync(d.path).size; total += kb; console.log(`  ${d.label.padEnd(16)} ${(kb / 1024).toFixed(0).padStart(4)} KB  ${path.relative(repoRoot, d.path)}`); }
+  console.log(`  ${"TOTAL inlined".padEnd(16)} ${(total / 1024).toFixed(0).padStart(4)} KB  (~${Math.round(total / 4 / 1000)}k tokens per prompt, before the angle text)`);
+  const md = fs.readFileSync(reviewPromptsPath, "utf8");
+  console.log(`angle prompts parsed from ${path.basename(reviewPromptsPath)}:`);
+  for (const key of ["A", "B", "C", "D"]) {
+    const p = extractAnglePrompt(md, key);
+    console.log(`  Angle ${key}: ${p ? `✓ found (${p.length} chars)` : "— not present"}`);
+  }
+  console.log(`\nwould run this round: [${active.map((a) => `${a.key}${a.repo ? "" : " no-repo"}`).join(", ")}]`);
+  process.exit(0);
+}
+
 for (let round = 1; round <= maxRounds; round++) {
-  const active = status.angles as Array<{ key: string; promptFile: string; repo: boolean }>;
+  const md = fs.readFileSync(reviewPromptsPath, "utf8");
   console.log(`\n— Round ${round}: reviewing [${active.map((a) => a.key).join(", ")}] —`);
 
+  // 1) Spawn the active reviewers (A alone / B·C·D in parallel), each a fresh peer.
   const findings: Record<string, { verdict: string; file: string }> = {};
   await Promise.all(active.map(async (a) => {
-    const prompt = fs.readFileSync(a.promptFile, "utf8");
-    const r = await runClaude({
-      model: REVIEWER.model, effort: REVIEWER.effort, prompt, permissionMode: HEADLESS,
-      cwd: a.repo ? repoDir : work,                          // A runs in the temp dir → physically no repo
-      disallowedTools: a.repo ? READONLY : NO_FILE_TOOLS,
-    });
-    const verdict = verdictOf(r.result);
-    const file = path.join(archiveDir, `${status.version}_GAP_REVIEW_${a.key}.md`);
-    fs.writeFileSync(file, r.result);
-    findings[a.key] = { verdict, file };
-    console.log(`  ${a.key}: ${verdict}  → ${path.basename(file)}`);
+    const anglePrompt = extractAnglePrompt(md, a.key);
+    if (!anglePrompt) die(`could not find the Angle ${a.key} prompt in ${path.basename(reviewPromptsPath)}`);
+    const result = await runReviewer(a, withCoreDocs(coreDocs, anglePrompt), repoRoot);
+    const ver = path.basename(reviewPromptsPath).replace(/_REVIEW_PROMPTS\.md$/i, "");
+    const file = path.join(archiveDir, `${ver}_GAP_REVIEW_${a.key}.md`);
+    fs.writeFileSync(file, result);
+    findings[a.key] = { verdict: verdictOf(result), file };
+    console.log(`  ${a.key}: ${findings[a.key].verdict}  → ${path.basename(file)}`);
   }));
 
+  // 2) All active angles READY → this phase is clear.
   if (Object.values(findings).every((f) => f.verdict === "READY")) {
-    console.log("\n✅ Every active angle returned READY TO BUILD."); break;
+    console.log("\n✅ Every active angle returned READY TO BUILD.");
+    // PILOT-HARDEN: A-gate close → orchestrator preps B/C/D kickoff (new dir); and the final
+    // Build Guide Final Cuts after B/C/D close. For the first pilot these are driven by hand
+    // with the orchestrator; wiring them as explicit steps is the next hardening pass.
+    break;
   }
 
-  // 3) Orchestrator validates + folds; flags decisions; chooses the next round's angles.
-  orch = await runClaude({
-    ...ORCHESTRATOR, cwd: repoDir, resume: orchSession, permissionMode: HEADLESS,
-    prompt: orchestratorPrompt(
-      `Findings written: ${Object.entries(findings).map(([k, f]) => `${k}=${f.file} (${f.verdict})`).join(", ")}. ` +
-      `Validate each (flag-don't-assert: verify before folding), fold the REAL ones into the IMPLEMENT, bump the version, ` +
-      `update the ledger (replace superseded entries), run the 2-subagent breadth pass, regenerate the prompt files + REVIEW_PROMPTS.md, ` +
-      `and compact your own session forward. Do NOT fold a finding that is a DECISION (architecture / north-star / genuinely unclear) — surface it. ` +
-      `Angle-by-angle: only re-run an angle whose lane a fold touched (scoped + narrowed); omit angles that stay closed. ` +
-      `JSON: { "version":"vX_Y_Z", "foldedCount":N, "decisionsNeeded":["..."], "angles":[ {"key","promptFile","repo"} to run NEXT ] }`
-    ),
+  // 3) Fold. Resume Sean's orchestrator; it validates + folds + bumps + regenerates + self-compacts.
+  if (!orchSession) die("findings need folding but no orchestrator session — re-run with --orchestrator-id <uuid>.");
+  const foldPrompt = [
+    `You are resuming as the Build-Guide Planning Orchestrator (your own thread) for the gap-review gate on ${implAbs}.`,
+    `Round ${round} findings are written to disk: ${Object.entries(findings).map(([k, f]) => `${k}=${f.file} (${f.verdict})`).join(", ")}.`,
+    `Per DEV_RULES v4.1.0 §The Gap-Review Gate: VALIDATE each finding against reality (flag-don't-assert — verify before folding; do NOT fold a finding that is a DECISION — a north-star / architecture / genuinely-unclear call — surface it instead).`,
+    `Fold the real ones into the IMPLEMENT + addenda, bump the version, update the "Settled — do not re-raise" ledger (replace superseded entries, never append a contradiction), run the 2-subagent breadth pass, and regenerate the REVIEW_PROMPTS (scoped + narrowed re-prompt for any passed angle whose lane a fold touched; omit angles that stay closed).`,
+    `Then WRITE your own forward /compact instruction (what the NEXT round must keep) and return it as compactArg.`,
+    `Return ONLY the structured control payload.`,
+  ].join("\n\n");
+
+  let fold = await runQuery({
+    prompt: foldPrompt,
+    model: ORCHESTRATOR.model,
+    effort: ORCHESTRATOR.effort,
+    cwd: repoRoot,
+    resume: orchSession,
+    permissionMode: HEADLESS,
+    settingSources: ["user", "project", "local"],   // its project context: CLAUDE.md/AGENTS.md/DEV_RULES/memory
+    jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
   });
-  status = extractJson(orch.result);
-  if (!status) { console.error("orchestrator fold returned no JSON:\n", orch.result.slice(0, 1500)); process.exit(1); }
-  console.log(`  folded ${status.foldedCount ?? "?"} → ${status.version}`);
+  let payload = fold.structuredOutput as FoldPayload | undefined;
+  if (!payload) die(`orchestrator returned no structured payload:\n${fold.result.slice(0, 1200)}`);
+  console.log(`  folded ${payload.foldedCount ?? "?"} → ${payload.version}${payload.gateStatus ? `  (${payload.gateStatus})` : ""}`);
 
-  // 4) Human decision-pause — the loop CANNOT fold a judgment call without you.
-  if (status.decisionsNeeded?.length) {
-    console.log(`\n⏸  ${status.decisionsNeeded.length} decision(s) need you:`);
+  // 4) Human decision-pause — the loop CANNOT fold a judgment call without Sean.
+  if (payload.decisionsNeeded?.length) {
+    console.log(`\n⏸  ${payload.decisionsNeeded.length} decision(s) need you:`);
     const answers: string[] = [];
-    for (const d of status.decisionsNeeded) answers.push(`Q: ${d}\nA: ${await ask(`\n${d}\n> `)}`);
-    orch = await runClaude({
-      ...ORCHESTRATOR, cwd: repoDir, resume: orchSession, permissionMode: HEADLESS,
-      prompt: orchestratorPrompt(`The human answered:\n${answers.join("\n\n")}\n\nFold accordingly, regenerate prompts, return the same JSON shape (angles to run next).`),
+    for (const d of payload.decisionsNeeded) answers.push(`Q: ${d}\nA: ${await ask(`\n${d}\n> `)}`);
+    fold = await runQuery({
+      prompt: `The human answered:\n\n${answers.join("\n\n")}\n\nFold accordingly, regenerate the REVIEW_PROMPTS, and return the same structured payload shape.`,
+      model: ORCHESTRATOR.model, effort: ORCHESTRATOR.effort, cwd: repoRoot, resume: orchSession,
+      permissionMode: HEADLESS, settingSources: ["user", "project", "local"],
+      jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
     });
-    status = extractJson(orch.result) ?? status;
+    payload = (fold.structuredOutput as FoldPayload | undefined) ?? payload;
   }
 
-  if (!status.angles?.length) { console.log("\n✅ No angles left to re-run — gate clear."); break; }
+  // 5) File-drop compaction — drive the orchestrator's self-authored /compact on its own session.
+  if (payload.compactArg?.trim()) {
+    const c = await runQuery({ prompt: `/compact ${payload.compactArg.trim()}`, resume: orchSession, model: ORCHESTRATOR.model, cwd: repoRoot, permissionMode: HEADLESS });
+    console.log(`  compacted forward${c.isError ? " (⚠ compact returned an error — check context growth)" : ""}`);
+  }
+
+  // 6) Follow the orchestrator to the next round's docs + angles.
+  reviewPromptsPath = path.resolve(payload.reviewPromptsPath);
+  archiveDir = payload.archiveDir ? path.resolve(payload.archiveDir) : path.dirname(reviewPromptsPath);
+  if (!fs.existsSync(reviewPromptsPath)) die(`orchestrator reported a REVIEW_PROMPTS that isn't on disk: ${reviewPromptsPath}`);
+  const nextImpl = path.join(archiveDir, path.basename(reviewPromptsPath).replace(/_REVIEW_PROMPTS\.md$/i, "_IMPLEMENT.md"));
+  if (fs.existsSync(nextImpl)) coreDocs = resolveCoreDocs(nextImpl, repoRoot); // re-inline the bumped docs
+
+  if (!payload.nextAngles?.length) { console.log("\n✅ No angles left to re-run — gate clear."); break; }
+  active = payload.nextAngles;
 }
 
-console.log("\nDone. GAP_REVIEW + REVIEW_PROMPTS files are in", archiveDir);
-console.log("(First cut — foundation smoke-tested; the Phase 5 pilot hardens the orchestrator JSON contract, A's no-repo enforcement, the end-game cleanup, and breadth-subagent wiring.)");
+console.log(`\nDone. GAP_REVIEW + REVIEW_PROMPTS files are in ${archiveDir}`);
+console.log("(First SDK cut — foundation gates proven; phase A→B/C/D transition and Build Guide Final Cuts are the next hardening pass, driven with the orchestrator during the pilot.)");
