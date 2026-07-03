@@ -3,7 +3,7 @@
 // Each subcommand proves ONE risky mechanic in isolation (prove the cheap mechanics first,
 // so a live gate never fails deep in round 7 on something we could have checked up front).
 //
-//   probe auth                    — assert we're on the Max SUBSCRIPTION, not an API key
+//   probe auth [--model <id>]     — assert we're on the Max SUBSCRIPTION, not an API key (and that <id> resolves)
 //   probe compact                 — can a self-authored /compact be driven on a resumed session? (GATE #1)
 //   probe isolate <repoRoot>      — does an Angle-A instance (temp cwd, file tools denied) truly fail to read the repo?
 //   probe find <dir> <title...>   — locate a /rename-titled session (e.g. the orchestrator thread) — NO model spend
@@ -16,20 +16,26 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const [cmd, ...rest] = process.argv.slice(2);
+const [cmd, ...rest] = process.argv.slice(2).flatMap((t) => {
+  const m = t.startsWith("--") ? t.match(/^(--[^=]+)=(.*)$/s) : null;   // --model=claude-opus-4-7 → --model claude-opus-4-7
+  return m ? [m[1], m[2]] : [t];
+});
+function argVal(flag: string): string | undefined { const i = rest.indexOf(flag); return i >= 0 ? rest[i + 1] : undefined; }
 // A metered API key manifests as one of these apiKeySource values. Anything else
 // ('none' = no key used, 'oauth'/'temporary' = subscription OAuth) means the key was
 // stripped and we fell through to the claude.ai Max login — verified via `claude auth status`.
 const METERED_SOURCES = new Set(["user", "project", "org", "ANTHROPIC_API_KEY"]);
 
 async function auth(): Promise<void> {
-  const r = await runQuery({ prompt: "Reply with exactly: ok", model: "opus", effort: "low" });
+  const model = argVal("--model") ?? "opus";   // pass a specific id (e.g. claude-opus-4-7) to confirm it resolves on the subscription
+  const r = await runQuery({ prompt: "Reply with exactly: ok", model, effort: "low" });
   const ok = !METERED_SOURCES.has(r.apiKeySource);
+  console.log(`model        : ${model}  ${r.isError ? "✗ query errored (bad model id?)" : "✓ accepted"}`);
   console.log(`apiKeySource : ${r.apiKeySource}  ${ok ? "✓ subscription (no metered key used)" : "✗ NOT subscription — an API key won the auth race"}`);
   console.log(`result       : ${JSON.stringify(r.result).slice(0, 80)}`);
   console.log(`cost (usd)   : ${r.costUsd}`);
   console.log(`session id   : ${r.sessionId}`);
-  process.exit(ok ? 0 : 1);
+  process.exit(ok && !r.isError ? 0 : 1);
 }
 
 async function compact(): Promise<void> {

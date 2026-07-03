@@ -19,7 +19,7 @@
 // structured control payload. Minimal parsing = maximum format-stability.
 
 import { runQuery, findSessionByTitle } from "./sdk.ts";
-import { ORCHESTRATOR, REVIEWER } from "../config.ts";
+import { ORCHESTRATOR, REVIEWER, type Effort } from "../config.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -75,6 +75,113 @@ function arg(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
+
+// ── Per-run model / effort overrides (the usage-meter knobs) ─────────────────
+// Defaults live in config.ts (reviewers opus/max, orchestrator opus/xhigh); these flags
+// only opt a given RUN down. Two equivalent routes, one resolver:
+//   convenience — --opus-4-7-reviewers | --opus-4-7-reviewer-a | --opus-4-7-reviewer-b-d-c | --opus-4-7-orchestrator
+//   explicit    — --reviewers <model> | --reviewer-a <model> | --orchestrator <model> | --reviewer-effort <lvl> | --orchestrator-effort <lvl>
+// A bare effort flag (--max/--xhigh/--high/--medium/--low) binds to whichever node a model
+// flag in the SAME command targeted (reviewers if none; error if both, use the explicit form).
+type Angle = "A" | "B" | "C" | "D";
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+const MODEL_ALIASES: Record<string, string> = {
+  // exceptions only — dated ids or anything the `claude-<slug>` pattern gets wrong
+  "haiku-4-5": "claude-haiku-4-5-20251001",
+};
+function resolveModel(slug: string): string {
+  if (MODEL_ALIASES[slug]) return MODEL_ALIASES[slug];
+  if (["opus", "sonnet", "haiku"].includes(slug)) return slug;   // bare alias = latest
+  return `claude-${slug}`;                                        // opus-4-7 → claude-opus-4-7
+}
+
+interface Overrides {
+  reviewerModel: Record<Angle, string | undefined>;
+  orchModel?: string;
+  reviewerEffort?: Effort;
+  orchEffort?: Effort;
+}
+
+function requireVal(v: string | undefined, flag: string): string {
+  if (!v || v.startsWith("--")) die(`${flag} needs a value (a model, e.g. opus-4-7)`);
+  return v;
+}
+function requireEffort(v: string | undefined): Effort {
+  if (!v || !(EFFORTS as readonly string[]).includes(v)) die(`effort must be one of ${EFFORTS.join("|")}`);
+  return v as Effort;
+}
+
+function parseOverrides(argv: string[]): Overrides {
+  const reviewerModel: Record<Angle, string | undefined> = { A: undefined, B: undefined, C: undefined, D: undefined };
+  let orchModel: string | undefined, reviewerEffort: Effort | undefined, orchEffort: Effort | undefined, bareEffort: Effort | undefined;
+  let sawReviewerModel = false, sawOrchModel = false;
+  const allAngles: Angle[] = ["A", "B", "C", "D"];
+
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (!tok.startsWith("--")) continue;
+    const body = tok.slice(2);
+
+    // explicit effort (always wins over a bare effort flag)
+    if (body === "reviewer-effort") { reviewerEffort = requireEffort(argv[++i]); continue; }
+    if (body === "orchestrator-effort") { orchEffort = requireEffort(argv[++i]); continue; }
+    // explicit model (value in the NEXT token)
+    if (body === "orchestrator") { orchModel = resolveModel(requireVal(argv[++i], tok)); sawOrchModel = true; continue; }
+    if (body === "reviewers") { const m = resolveModel(requireVal(argv[++i], tok)); allAngles.forEach((k) => (reviewerModel[k] = m)); sawReviewerModel = true; continue; }
+    const explRev = body.match(/^reviewer-([a-d])$/i);
+    if (explRev) { reviewerModel[explRev[1].toUpperCase() as Angle] = resolveModel(requireVal(argv[++i], tok)); sawReviewerModel = true; continue; }
+    // bare effort
+    if ((EFFORTS as readonly string[]).includes(body)) { bareEffort = body as Effort; continue; }
+    // convenience: --<slug>-all (every node → one model)
+    let m = body.match(/^(.+)-all$/);
+    if (m) { const md = resolveModel(m[1]); allAngles.forEach((k) => (reviewerModel[k] = md)); orchModel = md; sawReviewerModel = true; sawOrchModel = true; continue; }
+    // convenience: --<slug>-orchestrator
+    m = body.match(/^(.+)-orchestrator$/);
+    if (m) { orchModel = resolveModel(m[1]); sawOrchModel = true; continue; }
+    // convenience: --<slug>-reviewers (all)
+    m = body.match(/^(.+)-reviewers$/);
+    if (m) { const md = resolveModel(m[1]); allAngles.forEach((k) => (reviewerModel[k] = md)); sawReviewerModel = true; continue; }
+    // convenience: --<slug>-reviewer-<letters> (a | a-b | b-d-c …)
+    m = body.match(/^(.+)-reviewer-([a-d](?:-[a-d])*)$/i);
+    if (m) { const md = resolveModel(m[1]); for (const L of m[2].split("-")) reviewerModel[L.toUpperCase() as Angle] = md; sawReviewerModel = true; continue; }
+    // anything else isn't ours (--phase, --max-rounds, --dry-run, …) — left for arg()
+  }
+
+  if (bareEffort) {
+    if (sawReviewerModel && sawOrchModel) die(`ambiguous --${bareEffort}: both a reviewer and an orchestrator model flag are present — use --reviewer-effort / --orchestrator-effort to say which.`);
+    else if (sawOrchModel) orchEffort = orchEffort ?? bareEffort;
+    else reviewerEffort = reviewerEffort ?? bareEffort;
+  }
+  return { reviewerModel, orchModel, reviewerEffort, orchEffort };
+}
+
+const HELP = `gate <IMPLEMENT-path> [flags]
+
+  Phase / loop:
+    --phase A|BCD|all         which angles to start (default all -> cold-A first)
+    --phase-a  --phase-bcd    hyphenated aliases for the above
+    --max-rounds N            safety cap (default 12)
+    --dry-run                 resolve + parse + report resolved models/effort; spawn nothing (no spend)
+
+  Model down-shift (default = latest Opus):
+    --<model>-reviewers               all reviewers -> <model>   e.g. --opus-4-7-reviewers
+    --<model>-reviewer-a|-b|-c|-d     one reviewer               e.g. --opus-4-7-reviewer-a
+    --<model>-reviewer-a-b ...        any combo                  e.g. --opus-4-7-reviewer-b-d-c
+    --<model>-orchestrator            the orchestrator thread    e.g. --opus-4-7-orchestrator
+    --<model>-all                     every node -> <model>      e.g. --opus-4-7-all
+    --reviewers <model> | --reviewer-a <model> | --orchestrator <model>   explicit form
+      <model>: opus | sonnet | opus-4-7 | opus-4-8 | sonnet-5 | ...
+
+  Effort down-shift:
+    --max --xhigh --high --medium --low   binds to the node your model flag targeted
+                                          (reviewers if none); default reviewers=max, orch=xhigh
+    --reviewer-effort <lvl> | --orchestrator-effort <lvl>   explicit, always wins
+
+  Any value flag also takes = (no space):  --orchestrator-effort=high  --max-rounds=8  --reviewers=opus-4-7
+
+  Orchestrator lookup:
+    --orchestrator-title "..."  | --orchestrator-id <uuid>  | --project-doc <path>`;
 
 async function ask(q: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -170,12 +277,12 @@ function withCoreDocs(coreDocs: { label: string; path: string }[], anglePrompt: 
 }
 
 // ── Spawn one reviewer (a fresh, separate peer) ──────────────────────────────
-async function runReviewer(a: { key: string; repo: boolean }, prompt: string, repoRoot: string): Promise<string> {
+async function runReviewer(a: { key: string; repo: boolean }, prompt: string, repoRoot: string, model: string, effort: Effort): Promise<string> {
   const work = a.repo ? repoRoot : fs.mkdtempSync(path.join(os.tmpdir(), `gate-${a.key}-`));
   const r = await runQuery({
     prompt,
-    model: REVIEWER.model,
-    effort: REVIEWER.effort,
+    model,
+    effort,
     cwd: work,                                      // A runs in a throwaway dir → physically no repo
     disallowedTools: a.repo ? READONLY : NO_FILE_TOOLS,
     permissionMode: HEADLESS,
@@ -185,15 +292,37 @@ async function runReviewer(a: { key: string; repo: boolean }, prompt: string, re
 }
 
 // ── The run ──────────────────────────────────────────────────────────────────
+// Expand --flag=value into --flag value so no value-flag ever needs a space
+// (--max-rounds=8, --orchestrator-effort=high, --reviewers=opus-4-7, …). Boolean/convenience
+// flags carry no "=" and pass through untouched.
+process.argv = process.argv.flatMap((t) => {
+  const m = t.startsWith("--") ? t.match(/^(--[^=]+)=(.*)$/s) : null;
+  return m ? [m[1], m[2]] : [t];
+});
+const rawArgs = process.argv.slice(2);
+if (rawArgs.length === 0 || rawArgs.includes("--help") || rawArgs.includes("-h")) { console.log(HELP); process.exit(0); }
+
 const implPath = process.argv[2];
-if (!implPath || implPath.startsWith("--")) die("usage: gate <IMPLEMENT-path> [--phase A|BCD|all] [--max-rounds N]");
+if (!implPath || implPath.startsWith("--")) die("usage: gate <IMPLEMENT-path> [flags]  (try --help)");
 const implAbs = path.resolve(implPath);
 if (!fs.existsSync(implAbs)) die(`IMPLEMENT not found: ${implAbs}`);
 
-const phase = (arg("--phase") ?? "all") as "A" | "BCD" | "all";
+function resolvePhase(): "A" | "BCD" | "all" {
+  if (rawArgs.includes("--phase-a")) return "A";
+  if (rawArgs.includes("--phase-bcd")) return "BCD";
+  const p = (arg("--phase") ?? "all").toUpperCase();
+  if (p === "A") return "A";
+  if (p === "BCD") return "BCD";
+  if (p === "ALL") return "all";
+  die(`--phase must be A | BCD | all (got ${arg("--phase")})`);
+}
+const phase = resolvePhase();
 const maxRounds = Number(arg("--max-rounds") ?? 12);
 const orchTitle = arg("--orchestrator-title") ?? DEFAULT_ORCH_TITLE;
 const dryRun = process.argv.includes("--dry-run"); // resolve + parse + report, spawn nothing
+const ov = parseOverrides(rawArgs);
+const orchModel = ov.orchModel ?? ORCHESTRATOR.model;
+const orchEffort = ov.orchEffort ?? ORCHESTRATOR.effort;
 
 const repoRoot = gitRoot(path.dirname(implAbs));
 let archiveDir = path.dirname(implAbs);
@@ -223,6 +352,10 @@ if (dryRun) {
   console.log(`archive dir       : ${archiveDir}`);
   console.log(`REVIEW_PROMPTS    : ${path.basename(reviewPromptsPath)}`);
   console.log(`orchestrator      : ${orchSession ?? "(not found — folding would need --orchestrator-id)"}`);
+  console.log(`resolved nodes    : (defaults from config.ts unless a flag overrides)`);
+  for (const k of ["A", "B", "C", "D"] as Angle[])
+    console.log(`  reviewer ${k}       ${(ov.reviewerModel[k] ?? REVIEWER.model).padEnd(20)} ${ov.reviewerEffort ?? REVIEWER.effort}`);
+  console.log(`  orchestrator     ${orchModel.padEnd(20)} ${orchEffort}`);
   console.log(`core docs (inlined every prompt):`);
   let total = 0;
   for (const d of coreDocs) { const kb = fs.statSync(d.path).size; total += kb; console.log(`  ${d.label.padEnd(16)} ${(kb / 1024).toFixed(0).padStart(4)} KB  ${path.relative(repoRoot, d.path)}`); }
@@ -246,7 +379,9 @@ for (let round = 1; round <= maxRounds; round++) {
   await Promise.all(active.map(async (a) => {
     const anglePrompt = extractAnglePrompt(md, a.key);
     if (!anglePrompt) die(`could not find the Angle ${a.key} prompt in ${path.basename(reviewPromptsPath)}`);
-    const result = await runReviewer(a, withCoreDocs(coreDocs, anglePrompt), repoRoot);
+    const rModel = ov.reviewerModel[a.key as Angle] ?? REVIEWER.model;
+    const rEffort = ov.reviewerEffort ?? REVIEWER.effort;
+    const result = await runReviewer(a, withCoreDocs(coreDocs, anglePrompt), repoRoot, rModel, rEffort);
     const ver = path.basename(reviewPromptsPath).replace(/_REVIEW_PROMPTS\.md$/i, "");
     const file = path.join(archiveDir, `${ver}_GAP_REVIEW_${a.key}.md`);
     fs.writeFileSync(file, result);
@@ -276,8 +411,8 @@ for (let round = 1; round <= maxRounds; round++) {
 
   let fold = await runQuery({
     prompt: foldPrompt,
-    model: ORCHESTRATOR.model,
-    effort: ORCHESTRATOR.effort,
+    model: orchModel,
+    effort: orchEffort,
     cwd: repoRoot,
     resume: orchSession,
     permissionMode: HEADLESS,
@@ -295,7 +430,7 @@ for (let round = 1; round <= maxRounds; round++) {
     for (const d of payload.decisionsNeeded) answers.push(`Q: ${d}\nA: ${await ask(`\n${d}\n> `)}`);
     fold = await runQuery({
       prompt: `The human answered:\n\n${answers.join("\n\n")}\n\nFold accordingly, regenerate the REVIEW_PROMPTS, and return the same structured payload shape.`,
-      model: ORCHESTRATOR.model, effort: ORCHESTRATOR.effort, cwd: repoRoot, resume: orchSession,
+      model: orchModel, effort: orchEffort, cwd: repoRoot, resume: orchSession,
       permissionMode: HEADLESS, settingSources: ["user", "project", "local"],
       jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
     });
@@ -304,7 +439,7 @@ for (let round = 1; round <= maxRounds; round++) {
 
   // 5) File-drop compaction — drive the orchestrator's self-authored /compact on its own session.
   if (payload.compactArg?.trim()) {
-    const c = await runQuery({ prompt: `/compact ${payload.compactArg.trim()}`, resume: orchSession, model: ORCHESTRATOR.model, cwd: repoRoot, permissionMode: HEADLESS });
+    const c = await runQuery({ prompt: `/compact ${payload.compactArg.trim()}`, resume: orchSession, model: orchModel, cwd: repoRoot, permissionMode: HEADLESS });
     console.log(`  compacted forward${c.isError ? " (⚠ compact returned an error — check context growth)" : ""}`);
   }
 

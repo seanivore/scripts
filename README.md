@@ -124,10 +124,14 @@ Automates the DEV_RULES *Gap-Review Gate* loop: spawns genuinely-separate **peer
 
 **Usage:**
 ```bash
-gate ~/Development/<repo>/assets/docs/archive/vX_Y/vX_Y_Z_IMPLEMENT.md --phase A
+gate ~/Development/<repo>/assets/docs/archive/vX_Y/vX_Y_Z_IMPLEMENT.md   # the full show (A looped → B/C/D)
 gate <IMPLEMENT-path> --dry-run                         # resolve + parse + report, no spend
-gate <IMPLEMENT-path> --phase BCD --max-rounds 8
+gate <IMPLEMENT-path> --phase-a                         # one band only (A); --phase-bcd for B/C/D
+gate <IMPLEMENT-path> --opus-4-7-reviewers              # down-shift models to relieve the usage meter
+gate --help                                             # all flags (model/effort overrides, phases, …)
 ```
+
+**Usage-meter knobs:** per-run model/effort overrides (`--opus-4-7-reviewers`, `--opus-4-7-reviewer-b-d-c`, `--opus-4-7-orchestrator --max`, `--xhigh`, …) opt a run down without touching the engine; defaults stay latest Opus. See `gate/README.md`.
 
 **Status:** first cut, foundation **proven** — subscription auth (`claude.ai / max`), `/compact` drivable via the SDK, Angle-A filesystem wall, and orchestrator resume-by-title all verified; `--dry-run` validated on real docs. Supervised live pilot next.
 

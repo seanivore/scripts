@@ -29,6 +29,23 @@ gate <IMPLEMENT-path> --phase BCD --max-rounds 8
 
 Needs `node` 22+ (the SDK + `tsx` are installed in this dir). Auth is the `claude.ai` Max login — no `ANTHROPIC_API_KEY` needed or used.
 
+## Model / effort overrides (the usage-meter knobs)
+
+Defaults (in `config.ts`) are latest Opus — reviewers `max`, orchestrator `xhigh`. These flags opt a single **run** down when the meter is tight; they never touch the engine. Every day-to-day override is a single self-contained token (no spaces):
+
+```bash
+gate <IMPLEMENT> --opus-4-7-reviewers            # all four reviewers → Opus 4.7
+gate <IMPLEMENT> --opus-4-7-reviewer-a           # just A
+gate <IMPLEMENT> --opus-4-7-reviewer-b-d-c       # any combo
+gate <IMPLEMENT> --opus-4-7-orchestrator --max   # orchestrator → 4.7 at max effort
+gate <IMPLEMENT> --xhigh                          # reviewers → xhigh (latest model, cheaper effort)
+```
+
+- `<model>` slug maps to an SDK id by pattern: `opus-4-7 → claude-opus-4-7`, `sonnet-5 → claude-sonnet-5`; bare `opus`/`sonnet`/`haiku` = latest. A future model just works — no new code. (Exceptions live in `MODEL_ALIASES` in `gate.ts`.)
+- Bare effort (`--max --xhigh --high --medium --low`) binds to whichever node your model flag targeted (reviewers if none). If both a reviewer and an orchestrator model flag are present, use the explicit `--reviewer-effort` / `--orchestrator-effort`.
+- Explicit forms (`--reviewers <model>`, `--reviewer-a <model>`, `--orchestrator <model>`, `--reviewer-effort <lvl>`, `--orchestrator-effort <lvl>`) always win.
+- `gate <IMPLEMENT> --dry-run` prints the resolved model + effort per node before any spend. `gate --help` lists everything.
+
 ## Status
 
 Foundation **proven**: subscription auth (`claude.ai / max`), `/compact` drivable via the SDK, Angle-A filesystem wall, and orchestrator-thread resume-by-title all verified; `--dry-run` validated against real Everlastings docs. **Next:** the supervised live pilot hardens the fold contract under load, the phase A→B/C/D transition, and the Build Guide Final Cuts end-game (`src/probe.ts` runs the individual verification gates).
