@@ -18,7 +18,7 @@
 // core docs, versions, next angles — is derived from the IMPLEMENT path or the orchestrator's
 // structured control payload. Minimal parsing = maximum format-stability.
 
-import { runQuery, findSessionByTitle } from "./sdk.ts";
+import { runQuery, findSessionByTitle, type RunResult } from "./sdk.ts";
 import { ORCHESTRATOR, REVIEWER, type Effort } from "../config.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -229,6 +229,20 @@ class Spinner {
   }
 }
 
+// A Max usage limit is not a crash — it's a "come back after the reset." Exit CLEANLY with
+// a plain message and the exact command to continue, instead of dumping a Node stack trace.
+function haltIfLimited(r: RunResult): void {
+  if (!r.rateLimited) return;
+  const currentImpl = path.join(archiveDir, path.basename(reviewPromptsPath).replace(/_REVIEW_PROMPTS\.md$/i, "_IMPLEMENT.md"));
+  const band = active.length === 1 && active[0].key === "A" ? "A" : "BCD";
+  console.log(`\n⏸  Max usage limit reached${r.resetHint ? ` — resets ${r.resetHint}` : ""}. This is a pause, not a failure.`);
+  console.log(`   Everything folded so far is saved on disk (latest docs in ${archiveDir}).`);
+  console.log(`   After the reset, continue from where you stopped:`);
+  console.log(`     gate ${currentImpl} --phase-${band.toLowerCase()}  <your same model/effort flags>`);
+  console.log(`   (A one-command \`gate --resume\` that remembers band + version + flags is on the NEXT_UPDATE list.)`);
+  process.exit(0);
+}
+
 function verdictOf(text: string): "READY" | "NARROW" | "PASS" {
   if (/NEEDS ANOTHER PASS \(NARROW\)/i.test(text)) return "NARROW";
   if (/READY TO BUILD/i.test(text)) return "READY";
@@ -316,9 +330,9 @@ function withCoreDocs(coreDocs: { label: string; path: string }[], anglePrompt: 
 }
 
 // ── Spawn one reviewer (a fresh, separate peer) ──────────────────────────────
-async function runReviewer(a: { key: string; repo: boolean }, prompt: string, repoRoot: string, model: string, effort: Effort): Promise<string> {
+async function runReviewer(a: { key: string; repo: boolean }, prompt: string, repoRoot: string, model: string, effort: Effort): Promise<RunResult> {
   const work = a.repo ? repoRoot : fs.mkdtempSync(path.join(os.tmpdir(), `gate-${a.key}-`));
-  const r = await runQuery({
+  return runQuery({
     prompt,
     model,
     effort,
@@ -327,7 +341,6 @@ async function runReviewer(a: { key: string; repo: boolean }, prompt: string, re
     permissionMode: HEADLESS,
     systemPromptPreset: true,                       // good tool-use behavior for B/C/D
   });
-  return r.result;
 }
 
 // ── The run ──────────────────────────────────────────────────────────────────
@@ -423,7 +436,9 @@ for (let round = 1; round <= maxRounds; round++) {
     if (!anglePrompt) { spin.end(); die(`could not find the Angle ${a.key} prompt in ${path.basename(reviewPromptsPath)}`); }
     const rModel = ov.reviewerModel[a.key as Angle] ?? REVIEWER.model;
     const rEffort = ov.reviewerEffort ?? REVIEWER.effort;
-    const result = await runReviewer(a, withCoreDocs(coreDocs, anglePrompt), repoRoot, rModel, rEffort);
+    const rr = await runReviewer(a, withCoreDocs(coreDocs, anglePrompt), repoRoot, rModel, rEffort);
+    haltIfLimited(rr);                               // a limit mid-round exits cleanly, not with a stack trace
+    const result = rr.result;
     const ver = path.basename(reviewPromptsPath).replace(/_REVIEW_PROMPTS\.md$/i, "");
     const file = path.join(archiveDir, `${ver}_GAP_REVIEW_${a.key}.md`);
     fs.writeFileSync(file, result);
@@ -467,6 +482,7 @@ for (let round = 1; round <= maxRounds; round++) {
     jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
   });
   foldSpin.end();
+  haltIfLimited(fold);
   let payload = fold.structuredOutput as FoldPayload | undefined;
   if (!payload) die(`orchestrator returned no structured payload:\n${fold.result.slice(0, 1200)}`);
   console.log(`  folded ${payload.foldedCount ?? "?"} → ${payload.version}${payload.gateStatus ? `  (${payload.gateStatus})` : ""}`);
@@ -482,6 +498,7 @@ for (let round = 1; round <= maxRounds; round++) {
       permissionMode: HEADLESS, settingSources: ["user", "project", "local"],
       jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
     });
+    haltIfLimited(fold);
     payload = (fold.structuredOutput as FoldPayload | undefined) ?? payload;
   }
 
@@ -490,7 +507,8 @@ for (let round = 1; round <= maxRounds; round++) {
     const compactSpin = new Spinner();
     compactSpin.begin(`compacting the orchestrator forward`);
     const c = await runQuery({ prompt: `/compact ${payload.compactArg.trim()}`, resume: orchSession, model: orchModel, cwd: repoRoot, permissionMode: HEADLESS });
-    compactSpin.end(`  compacted forward${c.isError ? " (⚠ compact returned an error — check context growth)" : ""}`);
+    compactSpin.end(`  compacted forward${c.isError && !c.rateLimited ? " (⚠ compact returned an error — check context growth)" : ""}`);
+    haltIfLimited(c);
   }
 
   // 6) Follow the orchestrator to the next round's docs + angles.

@@ -47,6 +47,8 @@ export interface RunResult {
   apiKeySource: ApiKeySource;                  // 'oauth'/'temporary' = subscription; else an API key leaked in
   costUsd: number;                             // notional; usage shows against Max on the subscription
   isError: boolean;
+  rateLimited: boolean;                        // true → hit a Max session/weekly limit (not a real failure)
+  resetHint?: string;                          // human reset time parsed from the limit message, if any
 }
 
 // Force the Max subscription: never let the metered key or a bearer proxy token win the
@@ -83,25 +85,47 @@ export async function runQuery(o: RunOpts): Promise<RunResult> {
   let structuredOutput: unknown;
   let costUsd = 0;
   let isError = false;
+  let rateLimited = false;
+  let resetHint: string | undefined;
 
-  for await (const m of query({ prompt: o.prompt, options })) {
-    if (m.type === "system" && m.subtype === "init") {
-      sessionId = m.session_id;
-      apiKeySource = m.apiKeySource;
-    } else if (m.type === "result") {
-      sessionId = m.session_id;
-      costUsd = m.total_cost_usd ?? 0;
-      if (m.subtype === "success") {
-        result = m.result;
-        structuredOutput = m.structured_output;
-      } else {
-        isError = true;
-        result = `[gate] query ended non-success: ${m.subtype}`;
+  // Detect a Max usage-limit signal from a message OR a thrown error, and pull the reset
+  // time out of it. The SDK THROWS on a session-limit ("You've hit your session limit ·
+  // resets 2:20am (…)"), so without this catch it crashes the whole loop with a stack trace.
+  const noteLimit = (text: string): void => {
+    rateLimited = true;
+    const m = text.match(/resets?\s+(.+)/i);
+    if (m && !resetHint) resetHint = m[1].trim();
+  };
+
+  try {
+    for await (const m of query({ prompt: o.prompt, options })) {
+      if (m.type === "system" && m.subtype === "init") {
+        sessionId = m.session_id;
+        apiKeySource = m.apiKeySource;
+      } else if (m.type === "rate_limit_event") {
+        if (m.rate_limit_info?.status === "rejected") noteLimit(result || "usage limit rejected");
+      } else if (m.type === "result") {
+        sessionId = m.session_id;
+        costUsd = m.total_cost_usd ?? 0;
+        if (m.subtype === "success") {
+          result = m.result;
+          structuredOutput = m.structured_output;
+        } else {
+          isError = true;
+          result = `[gate] query ended non-success: ${m.subtype}`;
+          if (/limit/i.test(String(m.subtype))) noteLimit(result);
+        }
       }
     }
+  } catch (e) {
+    isError = true;
+    const msg = e instanceof Error ? e.message : String(e);
+    result = msg;
+    if (/\blimit\b|rate.?limit|rejected/i.test(msg)) noteLimit(msg);
+    else throw e;                              // a genuine crash still surfaces loudly
   }
 
-  return { result, sessionId, structuredOutput, apiKeySource, costUsd, isError };
+  return { result, sessionId, structuredOutput, apiKeySource, costUsd, isError, rateLimited, resetHint };
 }
 
 // Locate an existing session — e.g. Sean's renamed "IMPLEMENT Build Planning Orchestrator"
