@@ -35,9 +35,12 @@ export interface RunOpts {
   forkSession?: boolean;
   permissionMode?: PermissionMode;             // default "bypassPermissions" for headless
   settingSources?: SettingSource[];            // orchestrator loads project/user; reviewers stay clean (omit)
-  systemPromptPreset?: boolean;                // true → claude_code preset (better tool use for B/C/D)
+  systemPromptPreset?: boolean;                // true → claude_code preset (grounding: cwd/git/tool-discipline)
+  systemPromptAppend?: string;                 // extra system-prompt text appended to the preset (e.g. Angle A's honest "no tools this run")
   jsonSchema?: Record<string, unknown>;        // structured control payload (orchestrator folds)
   abortController?: AbortController;
+  onEvent?: (m: unknown) => void;              // live progress: every streamed SDK message is forwarded (the renderer filters)
+  includePartialMessages?: boolean;            // also emit token-level stream_event partials (off by default; the typed task/tool msgs suffice)
 }
 
 export interface RunResult {
@@ -74,9 +77,12 @@ export async function runQuery(o: RunOpts): Promise<RunResult> {
     ...(o.resume ? { resume: o.resume } : {}),
     ...(o.forkSession ? { forkSession: true } : {}),
     ...(o.settingSources ? { settingSources: o.settingSources } : {}),
-    ...(o.systemPromptPreset ? { systemPrompt: { type: "preset", preset: "claude_code" } } : {}),
+    ...(o.systemPromptPreset
+      ? { systemPrompt: { type: "preset", preset: "claude_code", ...(o.systemPromptAppend ? { append: o.systemPromptAppend } : {}) } }
+      : {}),
     ...(o.jsonSchema ? { outputFormat: { type: "json_schema", schema: o.jsonSchema } } : {}),
     ...(o.abortController ? { abortController: o.abortController } : {}),
+    ...(o.includePartialMessages ? { includePartialMessages: true } : {}),
   };
 
   let sessionId = "";
@@ -99,6 +105,7 @@ export async function runQuery(o: RunOpts): Promise<RunResult> {
 
   try {
     for await (const m of query({ prompt: o.prompt, options })) {
+      o.onEvent?.(m);                            // forward every message to the live progress renderer
       if (m.type === "system" && m.subtype === "init") {
         sessionId = m.session_id;
         apiKeySource = m.apiKeySource;

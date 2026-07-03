@@ -19,6 +19,7 @@
 // structured control payload. Minimal parsing = maximum format-stability.
 
 import { runQuery, findSessionByTitle, type RunResult } from "./sdk.ts";
+import { ProgressView, demoProgress } from "./progress.ts";
 import { ORCHESTRATOR, REVIEWER, type Effort } from "../config.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -30,6 +31,53 @@ const HEADLESS = "bypassPermissions" as const;
 const NO_FILE_TOOLS = ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch"]; // A: pure reasoning
 const READONLY = ["Write", "Edit", "NotebookEdit"];                                                   // B/C/D: read, mutate nothing
 const DEFAULT_ORCH_TITLE = "IMPLEMENT Build Planning Orchestrator";
+
+// Every reviewer RETURNS its review as its reply — gate saves it (the courier writes the
+// GAP_REVIEW file). No reviewer writes a file. Appended to every reviewer prompt so this is a
+// gate GUARANTEE, not something a regenerated prompt must remember (the dropped-escape-hatch bug).
+const REVIEWER_OUTPUT_FOOTER = [
+  ``,
+  `---`,
+  `OUTPUT — return your COMPLETE review as your reply (do NOT write a file; the courier saves your reply):`,
+  `  1. The ranked list of findings — each names the exact workstream/phase/anchor + a plain-language failure scenario.`,
+  `  2. The single "if you fix one thing".`,
+  `  3. The one-line verdict: READY TO BUILD · NEEDS ANOTHER PASS · NEEDS ANOTHER PASS (NARROW).`,
+  `A review that finds NOTHING is suspect: a real build always has polish / non-breaking items worth surfacing, and even READY TO BUILD ships with them. "Nothing to find" reads as "didn't look", not "perfect" — take the time to find the real ones.`,
+].join("\n");
+
+// Angle A runs with the claude_code preset for GROUNDING (cwd/git/tool-discipline) but with NO
+// repo/file/shell tools (its no-repo wall). Without this the preset advertises tools we then deny,
+// and a starved A role-plays using a shell/subagents it never had. State the truth instead.
+const ANGLE_A_SYSTEM_APPEND =
+  "IMPORTANT: this run gives you NO file, shell, repo, web, or subagent tools — that absence is intentional (you are the cold, out-of-repo reader; the build docs are inlined in your prompt). Do not attempt to read files, run commands, write a file, or delegate to a subagent. Return your complete findings as your reply text.";
+
+// The courier contract the orchestrator MUST honor whenever it (re)generates REVIEW_PROMPTS.
+// gate extracts ONLY the fenced block under each `## Angle X` header, so DRY/placeholder
+// authoring ("[paste the ledger from above]") starves the reviewer (the v3.6.4 bug). Injected
+// into every orchestrator turn that regenerates the prompts.
+const PROMPT_CONTRACT =
+  `CRITICAL — write the REVIEW_PROMPTS so the gate courier delivers them intact. gate extracts ONLY the fenced code block under each "## Angle X —" header and sends THAT block verbatim to a fresh, no-context reviewer (gate inlines the four core docs separately, above the block). So EACH angle's fenced block MUST be fully self-contained + paste-ready: inline the COMPLETE current "Settled — do not re-raise" ledger, the full three-part review lens, and the settled-base paragraph directly INTO every block — NEVER a "[paste from above]" / "[LANDMINES …]" / "[REVIEW LENS]" placeholder (the courier sends those as literal text and the reviewer starves, engaging none of the accumulated findings). Keep ALL FOUR angle blocks present and current every round (fold each round's new ledger entries into every block), even while only some run this round — they must be ready when their phase arrives. Reproduce the static method prose verbatim per templates/review-prompt.md; do NOT trim it as "redundant". End each block with the output contract: the reviewer returns findings as its reply (never writes a file), and a review that finds NOTHING is suspect — even READY TO BUILD ships with polish / non-breaking items.`;
+
+// gate couriers ONLY the fenced block under `## Angle X`, so each block MUST be fully
+// self-contained (lens + settled-base + full ledger inlined). Refuse to spawn a reviewer on a
+// block that is still an un-expanded template (placeholder directives) or implausibly thin —
+// fail loud with the cause rather than silently run a starved review (the v3.6.4 bug).
+const PLACEHOLDER_RE = /\[\s*(paste|landmines?|review lens|settled base|ledger)\b|paste\b[^\n]*\b(from above|in full|verbatim|here)\b/i;
+function selfContainedIssue(anglePrompt: string): string | null {
+  const hit = anglePrompt.match(PLACEHOLDER_RE);
+  if (hit) return `holds a template placeholder ("${hit[0].trim()}") — the ledger/lens was referenced, not inlined`;
+  if (anglePrompt.length < 2000) return `is only ${anglePrompt.length} chars — implausibly thin for a self-contained block (lens + settled-base + ledger + charge)`;
+  return null;
+}
+function assertSelfContained(anglePrompt: string, key: string): void {
+  const issue = selfContainedIssue(anglePrompt);
+  if (!issue) return;
+  die(
+    `Angle ${key} prompt is not self-contained — it ${issue}.\n` +
+    `  gate couriers ONLY the fenced block under "## Angle ${key}", so anything not inlined never reaches the reviewer.\n` +
+    `  Regenerate REVIEW_PROMPTS with the full ledger + lens + settled-base inlined in EACH block (see templates/review-prompt.md).`,
+  );
+}
 
 // The orchestrator's fold control payload (structured output → no fragile prose parsing).
 const FOLD_SCHEMA = {
@@ -161,6 +209,10 @@ const HELP = `gate <IMPLEMENT-path> [flags]
   Phase / loop:
     --phase A|BCD|all         which angles to start (default all -> cold-A first)
     --phase-a  --phase-bcd    hyphenated aliases for the above
+    --qa  --preflight         vet the workflow first: the orchestrator audits + repairs all four
+                              angle prompts (self-contained + paste-ready), folds any real gap,
+                              bumps a patch — then the loop runs. Auto-runs when no REVIEW_PROMPTS
+                              exists (bootstrap) or the active block is an un-expanded template.
     --consolidate             enter at the clean-up-read step: condense the doc (own patch +
                               breadth), then continue into the loop's final cold-A pass
     --compact-first           with --consolidate: compact the orchestrator before condensing
@@ -336,6 +388,7 @@ function withCoreDocs(coreDocs: { label: string; path: string }[], anglePrompt: 
 
 // ── Spawn one reviewer (a fresh, separate peer) ──────────────────────────────
 async function runReviewer(a: { key: string; repo: boolean }, prompt: string, repoRoot: string, model: string, effort: Effort): Promise<RunResult> {
+  const isColdA = !a.repo;
   const work = a.repo ? repoRoot : fs.mkdtempSync(path.join(os.tmpdir(), `gate-${a.key}-`));
   return runQuery({
     prompt,
@@ -344,7 +397,8 @@ async function runReviewer(a: { key: string; repo: boolean }, prompt: string, re
     cwd: work,                                      // A runs in a throwaway dir → physically no repo
     disallowedTools: a.repo ? READONLY : NO_FILE_TOOLS,
     permissionMode: HEADLESS,
-    systemPromptPreset: true,                       // good tool-use behavior for B/C/D
+    systemPromptPreset: true,                       // preset = GROUNDING (cwd/git/tool-discipline), for every angle
+    ...(isColdA ? { systemPromptAppend: ANGLE_A_SYSTEM_APPEND } : {}), // …but A is told the truth: no tools this run
   });
 }
 
@@ -361,14 +415,15 @@ function implFromPayload(p: FoldPayload): string {
 // Run ONE schema'd orchestrator turn (resume the thread) with a heartbeat + clean limit-halt.
 async function orchTurn(prompt: string, label: string): Promise<FoldPayload | undefined> {
   if (!orchSession) die("orchestrator turn needs a session — pass --orchestrator-id <uuid> or ensure the titled thread exists.");
-  const s = new Spinner();
-  s.begin(label);
+  const pv = new ProgressView();
+  pv.begin(label, (label.split(/[\s—(]/)[0] || "working").toLowerCase());   // present-participle from the label's first word
   const r = await runQuery({
     prompt, model: orchModel, effort: orchEffort, cwd: repoRoot, resume: orchSession,
     permissionMode: HEADLESS, settingSources: ["user", "project", "local"],   // its project context: CLAUDE.md/AGENTS.md/DEV_RULES/memory
     jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
+    onEvent: (m) => pv.handle(m),                                             // live MAO-style progress tree
   });
-  s.end();
+  pv.end({ costUsd: r.costUsd, failed: r.isError && !r.rateLimited });
   haltIfLimited(r);
   return r.structuredOutput as FoldPayload | undefined;
 }
@@ -383,16 +438,74 @@ async function compactForward(compactArg: string | undefined): Promise<void> {
   haltIfLimited(c);
 }
 
-// Human decision-pause — the loop CANNOT fold a judgment call without Sean. Loops until the
-// human's answers leave no decision unresolved (a re-fold can surface a follow-on decision).
+// Does the human's reply read as a question BACK (wants to talk it through) rather than a decision?
+// Half the time Sean is asking the orchestrator to help him decide — that must not be folded past.
+function looksLikeQuestion(s: string): boolean {
+  const t = s.trim().toLowerCase();
+  if (!t) return false;
+  if (t.includes("?")) return true;
+  return /^(what|why|how|which|who|when|where|explain|clarify|confused|not sure|unsure|idk|i don'?t (know|understand)|can you|could you|would you|tell me|help me|walk me|ask|elaborate|wdyt|what do you think|give me|show me|more (info|detail))\b/.test(t);
+}
+
+// One CONVERSATIONAL (no-schema) orchestrator turn — returns its reply TEXT to show the human.
+// Used inside the decision-pause so Sean's questions get a real answer, not a silent fold.
+async function orchChat(prompt: string, label: string): Promise<string> {
+  if (!orchSession) die("orchestrator turn needs a session — pass --orchestrator-id <uuid> or ensure the titled thread exists.");
+  const pv = new ProgressView();
+  pv.begin(label, "thinking");
+  const r = await runQuery({
+    prompt, model: orchModel, effort: orchEffort, cwd: repoRoot, resume: orchSession,
+    permissionMode: HEADLESS, settingSources: ["user", "project", "local"],
+    onEvent: (m) => pv.handle(m),
+  });
+  pv.end({ costUsd: r.costUsd, failed: r.isError && !r.rateLimited });
+  haltIfLimited(r);
+  return r.result;
+}
+
+// Human decision-pause — the loop CANNOT fold a judgment call without Sean, and it is a genuine
+// TWO-WAY conversation: if his answer is a question back, the orchestrator ANSWERS it (shown to
+// him) and re-asks — looping until he gives a real decision, THEN folds. Never one-shot answer→
+// fold→move-on (the old bug: his questions went unanswered and gate silently folded past them).
 async function resolveDecisions(payload: FoldPayload): Promise<FoldPayload> {
   while (payload.decisionsNeeded?.length) {
-    console.log(`\n⏸  ${payload.decisionsNeeded.length} decision(s) need you:`);
+    const n = payload.decisionsNeeded.length;
+    console.log(`\n🞶  ${n} thing${n > 1 ? "s" : ""} I'd like your call on. Answer plainly — or ask me anything about it first (I'll explain, then re-ask; I won't move on until you've actually decided).`);
     const answers: string[] = [];
-    for (const d of payload.decisionsNeeded) answers.push(`Q: ${d}\nA: ${await ask(`\n${d}\n> `)}`);
+    for (const d of payload.decisionsNeeded) {
+      let prompt = d, decided = "";
+      for (;;) {                                     // talk until Sean gives a decision, not a question
+        const reply = (await ask(`\n${prompt}\n> `)).trim();
+        if (!reply) { console.log("  (blank is fine — type your decision, or a question if you'd like me to explain first.)"); continue; }
+        if (looksLikeQuestion(reply)) {
+          const answer = await orchChat(
+            [
+              `We're at a decision point in the gap-review gate. The question I put to the human was:`,
+              `"${d}"`,
+              `They didn't decide yet — they asked back:`,
+              `"${reply}"`,
+              `Answer them directly, in plain language, NO jargon (they don't know internal terms — never say "landmine" etc.). Explain your thinking, lay out the real options with trade-offs, and give your recommendation and WHY. Do NOT fold or change any docs — this is only a conversation to help them decide. Reply with just your message to them.`,
+            ].join("\n\n"),
+            `answering your question`,
+          );
+          console.log(`\n🞶  ${answer.trim()}`);
+          prompt = `So — your call on this: ${d}`;    // re-ask the same decision after answering
+          continue;
+        }
+        decided = reply;
+        break;
+      }
+      answers.push(`Q: ${d}\nA: ${decided}`);
+    }
     const next = await orchTurn(
-      `The human answered:\n\n${answers.join("\n\n")}\n\nFold accordingly, regenerate the REVIEW_PROMPTS, and return the same structured payload shape.`,
-      `re-folding after your decisions`,
+      [
+        `The human made these calls (after any back-and-forth):`,
+        answers.join("\n\n"),
+        `Fold each decision in accordingly and regenerate the REVIEW_PROMPTS.`,
+        PROMPT_CONTRACT,
+        `Return the same structured control payload shape.`,
+      ].join("\n\n"),
+      `folding in your decisions`,
     );
     payload = next ?? { ...payload, decisionsNeeded: [] };
   }
@@ -406,6 +519,7 @@ async function foldTurn(findings: Findings, round: number): Promise<FoldPayload>
     `Round ${round} findings are written to disk: ${Object.entries(findings).map(([k, f]) => `${k}=${f.file} (${f.verdict})`).join(", ")}.`,
     `Per DEV_RULES §The Gap-Review Gate: VALIDATE each finding against reality (flag-don't-assert — verify before folding; do NOT fold a finding that is a DECISION — a north-star / architecture / genuinely-unclear call — surface it instead).`,
     `Fold the real ones into the IMPLEMENT + addenda, bump the version (PATCH), update the "Settled — do not re-raise" ledger (replace superseded entries, never append a contradiction), run the 2-subagent breadth pass, and regenerate the REVIEW_PROMPTS (scoped + narrowed re-prompt for any passed angle whose lane a fold touched; omit angles that stay closed).`,
+    PROMPT_CONTRACT,
     `Then WRITE your own forward /compact instruction (what the NEXT round must keep) and return it as compactArg.`,
     `Return ONLY the structured control payload.`,
   ].join("\n\n");
@@ -431,10 +545,34 @@ async function consolidateStep(currentImpl: string): Promise<FoldPayload | undef
     `3) Drive a PATCH bump for the consolidation (a version distinct from the fold's).`,
     `4) Re-run the 2-subagent breadth pass on the CONSOLIDATED doc — critical: a condense is exactly where content can be accidentally dropped, so the breadth pass verifies the doc is still intact.`,
     `5) Regenerate the REVIEW_PROMPTS with the final narrow cold-A prompt against the consolidated version. Set nextAngles to exactly [{"key":"A","repo":false}].`,
+    PROMPT_CONTRACT,
     `Then WRITE your forward /compact instruction as compactArg. Return ONLY the structured control payload.`,
   ].join("\n\n");
   const payload = await orchTurn(prompt, `consolidating (clean-up read) — orchestrator (${orchModel} ${orchEffort})`);
   if (payload) console.log(`  consolidated → ${payload.version}${payload.gateStatus ? `  (${payload.gateStatus})` : ""}`);
+  return payload;
+}
+
+// QA PRE-FLIGHT — the orchestrator vets the whole workflow BEFORE any reviewer runs (Sean's QA
+// gate). Behaves like a normal fold pass: audit the IMPLEMENT + addenda + the four angle prompts,
+// fix/fold any gap it finds (mechanical OR a real missing/poorly-planned capability), run the 2
+// breadth subagents, bump PATCH — and (re)generate all four angle blocks fully self-contained +
+// paste-ready. Also BOOTSTRAPS a fresh run when no REVIEW_PROMPTS exists yet. Surfaces to the
+// human ONLY a genuine north-star fork (decisionsNeeded). Returns the new control payload.
+async function qaPreflightStep(currentImpl: string, promptsExist: boolean): Promise<FoldPayload | undefined> {
+  if (!fs.existsSync(currentImpl)) die(`qa-preflight: current IMPLEMENT not on disk: ${currentImpl}`);
+  const prompt = [
+    `You are resuming as the Build-Guide Planning Orchestrator (your own thread). This is the QA PRE-FLIGHT for ${currentImpl} — run ONCE before any reviewer, to guarantee the workflow assets are sound and the reviewer prompts are complete. Treat it exactly like a normal fold pass (validate → fold → breadth → bump), never a rubber stamp.`,
+    promptsExist
+      ? `A REVIEW_PROMPTS file exists next to the IMPLEMENT. AUDIT it: are ALL FOUR angle blocks (A + B/C/D; include D only if the build carries substantial design/UX) present, fully self-contained, and paste-ready, with the COMPLETE current ledger + full lens + settled-base inlined in EACH block? Repair anything an earlier instance left lazy — a missing block, a "[paste from above]" / "[LANDMINES …]" placeholder, a stale version, a ledger that was referenced instead of inlined.`
+      : `No REVIEW_PROMPTS exists yet — BOOTSTRAP it from scratch per templates/review-prompt.md: author all four angle blocks (include D only if the build carries substantial design/UX), seeding the "Settled — do not re-raise" ledger from what the IMPLEMENT + addenda already establish.`,
+    `Also audit the BUILD the way you would in a fold: read the IMPLEMENT + both addenda end-to-end and find any real gap — a missing or poorly-planned capability, an unvalidated assumption, an incoherence, stray archaeology. VALIDATE each against reality (flag-don't-assert; a finding that is a genuine DECISION gets surfaced, not folded). Fold the real ones, run the 2-subagent breadth pass, and drive a PATCH bump.`,
+    `Surface to the human (decisionsNeeded) ONLY a genuine fork that conflicts with the north star or a high-level project goal — in plain language, no jargon. Everything mechanical or clearly-correct you fix yourself; take the initiative.`,
+    PROMPT_CONTRACT,
+    `Return the control payload: version = the new PATCH version; archiveDir + reviewPromptsPath (ABSOLUTE); nextAngles = [] (the gate picks the round-1 angles from its --phase); decisionsNeeded = any genuine fork; compactArg = your forward note. Return ONLY the structured control payload.`,
+  ].join("\n\n");
+  const payload = await orchTurn(prompt, `QA pre-flight (vetting the workflow) — orchestrator (${orchModel} ${orchEffort})`);
+  if (payload) console.log(`  QA pre-flight → ${payload.version}${payload.gateStatus ? `  (${payload.gateStatus})` : ""}`);
   return payload;
 }
 
@@ -447,6 +585,7 @@ async function phaseHandoffA(findings: Findings, round: number): Promise<FoldPay
     `Round ${round} A findings: ${files}.`,
     `1) FIRST validate + fold the final A findings — even a READY pass carries polish / non-breaking-but-real findings; flag-don't-assert; surface any genuine DECISION instead of folding. Drive a PATCH bump and run the 2-subagent breadth pass.`,
     `2) Then, since A is now closed, do the PHASE HANDOFF (DEV_RULES §Versioning "demarcate phases with a MINOR bump"): drive a MINOR bump and COPY the living docs (IMPLEMENT + both addenda) into a NEW sibling directory vX_(Y+1)/ (e.g. .../v3_6/ → .../v3_7/). Leave the standing GAP_REVIEW records in the old dir (they keep it populated). Generate the B/C/D REVIEW_PROMPTS in the NEW dir.`,
+    PROMPT_CONTRACT,
     `Return the control payload: version = the new MINOR version; archiveDir = the NEW dir (ABSOLUTE path); reviewPromptsPath = the new B/C/D REVIEW_PROMPTS (ABSOLUTE); nextAngles = [{"key":"B","repo":true},{"key":"C","repo":true}] plus {"key":"D","repo":true} ONLY if the build carries substantial design/UX; decisionsNeeded = any surfaced; compactArg = your forward note.`,
     `Return ONLY the structured control payload.`,
   ].join("\n\n");
@@ -495,6 +634,7 @@ process.argv = process.argv.flatMap((t) => {
 });
 const rawArgs = process.argv.slice(2);
 if (rawArgs.length === 0 || rawArgs.includes("--help") || rawArgs.includes("-h")) { console.log(HELP); process.exit(0); }
+if (rawArgs.includes("--demo-ui")) { await demoProgress(); process.exit(0); } // zero-spend preview of the live progress view
 
 const implPath = process.argv[2];
 if (!implPath || implPath.startsWith("--")) die("usage: gate <IMPLEMENT-path> [flags]  (try --help)");
@@ -516,6 +656,7 @@ const orchTitle = arg("--orchestrator-title") ?? DEFAULT_ORCH_TITLE;
 const dryRun = process.argv.includes("--dry-run"); // resolve + parse + report, spawn nothing
 const consolidateMode = rawArgs.includes("--consolidate"); // enter at the clean-up-read step
 const compactFirst = rawArgs.includes("--compact-first");  // compact the orchestrator before consolidating
+const qaMode = rawArgs.includes("--qa") || rawArgs.includes("--preflight"); // vet/bootstrap the prompts first
 const ov = parseOverrides(rawArgs);
 const orchModel = ov.orchModel ?? ORCHESTRATOR.model;
 const orchEffort = ov.orchEffort ?? ORCHESTRATOR.effort;
@@ -524,7 +665,7 @@ const repoRoot = gitRoot(path.dirname(implAbs));
 let archiveDir = path.dirname(implAbs);
 let coreDocs = resolveCoreDocs(implAbs, repoRoot);
 let reviewPromptsPath = path.join(archiveDir, path.basename(implAbs).replace(/_IMPLEMENT\.md$/i, "_REVIEW_PROMPTS.md"));
-if (!fs.existsSync(reviewPromptsPath)) die(`REVIEW_PROMPTS not found next to the IMPLEMENT: ${reviewPromptsPath}`);
+const promptsExist = fs.existsSync(reviewPromptsPath); // absent → QA pre-flight bootstraps them (no longer a hard error)
 
 // Discover Sean's orchestrator thread (needed to fold). Resolve up front so we fail early.
 let orchSession = arg("--orchestrator-id");
@@ -542,6 +683,14 @@ let active: Array<{ key: string; repo: boolean }> =
 
 console.log(`▶ ${path.basename(implAbs)} — phase ${phase}, repo ${repoRoot}`);
 
+// QA pre-flight runs before the loop when: asked (--qa), bootstrapping (no prompts yet), or the
+// block gate is about to run is an un-expanded template (self-heal the v3.6.4-style starvation).
+const activeBlockBroken = promptsExist && ((): boolean => {
+  const md = fs.readFileSync(reviewPromptsPath, "utf8");
+  return active.some((a) => { const b = extractAnglePrompt(md, a.key); return !b || !!selfContainedIssue(b); });
+})();
+const runQa = qaMode || !promptsExist || activeBlockBroken;
+
 if (dryRun) {
   console.log(`\n=== DRY RUN (nothing spawned, no spend) ===`);
   console.log(`repo root         : ${repoRoot}`);
@@ -557,15 +706,40 @@ if (dryRun) {
   let total = 0;
   for (const d of coreDocs) { const kb = fs.statSync(d.path).size; total += kb; console.log(`  ${d.label.padEnd(16)} ${(kb / 1024).toFixed(0).padStart(4)} KB  ${path.relative(repoRoot, d.path)}`); }
   console.log(`  ${"TOTAL inlined".padEnd(16)} ${(total / 1024).toFixed(0).padStart(4)} KB  (~${Math.round(total / 4 / 1000)}k tokens per prompt, before the angle text)`);
-  const md = fs.readFileSync(reviewPromptsPath, "utf8");
-  console.log(`angle prompts parsed from ${path.basename(reviewPromptsPath)}:`);
-  for (const key of ["A", "B", "C", "D"]) {
-    const p = extractAnglePrompt(md, key);
-    console.log(`  Angle ${key}: ${p ? `✓ found (${p.length} chars)` : "— not present"}`);
+  if (!promptsExist) {
+    console.log(`REVIEW_PROMPTS    : (none yet — QA pre-flight would BOOTSTRAP ${path.basename(reviewPromptsPath)} from the IMPLEMENT)`);
+  } else {
+    const md = fs.readFileSync(reviewPromptsPath, "utf8");
+    console.log(`angle prompts parsed from ${path.basename(reviewPromptsPath)}:`);
+    for (const key of ["A", "B", "C", "D"]) {
+      const p = extractAnglePrompt(md, key);
+      if (!p) { console.log(`  Angle ${key}: — not present`); continue; }
+      const issue = selfContainedIssue(p);
+      console.log(`  Angle ${key}: ✓ found (${p.length} chars)${issue ? `  ⚠ WOULD BE REJECTED — ${issue}` : `  ✓ self-contained`}`);
+    }
   }
+  if (runQa) console.log(`\nQA pre-flight WOULD RUN first (${qaMode ? "--qa" : !promptsExist ? "no prompts → bootstrap" : "active block is an un-expanded template → self-heal"}), then the loop.`);
   console.log(`\nwould run this round: [${active.map((a) => `${a.key}${a.repo ? "" : " no-repo"}`).join(", ")}]`);
   if (consolidateMode) console.log(`\n--consolidate: would run the clean-up-read step on ${path.basename(coreDocs[0].path)} first${compactFirst ? " (after a compact-forward)" : ""}, then continue the loop on the cleaned doc.`);
   process.exit(0);
+}
+
+// QA PRE-FLIGHT — vet/bootstrap the workflow before any reviewer runs. Behaves like a fold:
+// (re)generates all four self-contained angle blocks, folds any real gap, bumps PATCH; the loop
+// then runs on the vetted docs. A surfaced north-star fork pauses for the human first.
+if (runQa) {
+  if (!orchSession) die(`QA pre-flight ${promptsExist ? "" : "/ bootstrap "}needs the orchestrator — pass --orchestrator-id <uuid> or ensure the titled thread exists under ${repoRoot}.`);
+  const why = qaMode ? "requested (--qa)" : !promptsExist ? "no REVIEW_PROMPTS yet — bootstrapping" : "the active angle prompt is an un-expanded template — self-healing before reviewing";
+  console.log(`\n▶ QA pre-flight — vetting the workflow (${why}).`);
+  let qa = await qaPreflightStep(coreDocs[0].path, promptsExist);
+  if (!qa) die("QA pre-flight returned no structured payload — cannot continue.");
+  qa = await resolveDecisions(qa);
+  await compactForward(qa.compactArg);
+  reviewPromptsPath = path.resolve(qa.reviewPromptsPath);
+  archiveDir = qa.archiveDir ? path.resolve(qa.archiveDir) : path.dirname(reviewPromptsPath);
+  const qaImpl = implFromPayload(qa);
+  if (fs.existsSync(qaImpl)) coreDocs = resolveCoreDocs(qaImpl, repoRoot);
+  console.log(`▶ QA pre-flight complete → ${qa.version}; entering the loop with [${active.map((a) => a.key).join(", ")}].`);
 }
 
 // Enter at the CONSOLIDATE step (pick up mid-workflow), then fall into the normal loop on the
@@ -596,9 +770,10 @@ for (let round = 1; round <= maxRounds; round++) {
   await Promise.all(active.map(async (a) => {
     const anglePrompt = extractAnglePrompt(md, a.key);
     if (!anglePrompt) { spin.end(); die(`could not find the Angle ${a.key} prompt in ${path.basename(reviewPromptsPath)}`); }
+    if (selfContainedIssue(anglePrompt)) { spin.end(); assertSelfContained(anglePrompt, a.key); } // never courier a starved block
     const rModel = ov.reviewerModel[a.key as Angle] ?? REVIEWER.model;
     const rEffort = ov.reviewerEffort ?? REVIEWER.effort;
-    const rr = await runReviewer(a, withCoreDocs(coreDocs, anglePrompt), repoRoot, rModel, rEffort);
+    const rr = await runReviewer(a, withCoreDocs(coreDocs, anglePrompt + REVIEWER_OUTPUT_FOOTER), repoRoot, rModel, rEffort);
     haltIfLimited(rr);                               // a limit mid-round exits cleanly, not with a stack trace
     const result = rr.result;
     const ver = path.basename(reviewPromptsPath).replace(/_REVIEW_PROMPTS\.md$/i, "");
@@ -606,7 +781,10 @@ for (let round = 1; round <= maxRounds; round++) {
     fs.writeFileSync(file, result);
     findings[a.key] = { verdict: verdictOf(result), file };
     pending.delete(a.key);
-    spin.log(`  ${a.key}: ${findings[a.key].verdict}  → ${path.basename(file)}`);
+    // Empty-review tripwire: a real review surfaces polish even on READY. A suspiciously thin
+    // reply is the fingerprint of a starved/confabulated reviewer — flag it loudly, don't trust it.
+    const thin = result.trim().length < 1000;
+    spin.log(`  ${a.key}: ${findings[a.key].verdict}  → ${path.basename(file)}${thin ? `  ⚠ only ${result.trim().length} chars — suspiciously thin; review by hand before trusting` : ""}`);
     spin.setLabel(`Round ${round} — reviewing [${[...pending].join(", ") || "wrapping up"}]`);
   }));
   spin.end();

@@ -5,7 +5,11 @@ Newest at top. When one ships, move it to a "Done" note in the README/commit and
 
 ---
 
-## 1. Decision-pause should be a two-way conversation (UX)
+## 1. Decision-pause should be a two-way conversation (UX) — ✅ SHIPPED (2026-07-03)
+
+**Shipped:** `resolveDecisions` is now a genuine two-way loop — if Sean's answer reads as a question back (heuristic `looksLikeQuestion`), gate relays it to the orchestrator via a conversational no-schema turn (`orchChat`), prints the reply, and re-asks the same decision; it only folds once he gives an actual decision. Plain-language, no-jargon framing enforced in the relay prompt. Verify live when a real decision surfaces.
+
+<details><summary>original note</summary>
 
 **Observed (v3_6, round 1→2):** gate surfaced 2 decisions correctly. Sean answered both — and his answers *included questions back to the orchestrator* ("I'm confused by the question and what B is — can you explain why you think B so I better understand and can decide?" / "what do you think of that logic? … you can advise what the best option is"). gate took the typed answers, silently re-folded, printed `compacted forward`, and jumped to Round 2. **Sean never saw the orchestrator respond** — his questions went unanswered and he couldn't tell if his reasoning was even received.
 
@@ -16,6 +20,7 @@ Newest at top. When one ships, move it to a "Done" note in the README/commit and
 - Allow a **back-and-forth loop**: if the human's answer contains a question (or they type `?`/`ask`), re-prompt the orchestrator, show its reply, and re-ask the human — repeat until the human gives a clear decision, *then* fold.
 - Keep the no-timeout readline; this is deliberately human-paced.
 - Consider showing the orchestrator's *recommendation rationale* up front with each decision (it already computes "Recommended: (b) …") so Sean has the reasoning before he answers.
+</details>
 
 ---
 

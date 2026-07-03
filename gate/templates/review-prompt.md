@@ -5,14 +5,25 @@ The Build-Guide orchestrator fills the {{PLACEHOLDERS}}, injects the ledger, and
 regenerates this whole file on disk as `vX_Y_Z_REVIEW_PROMPTS.md` each round.
 
 RULES FOR THE GENERATOR:
-- STATIC prose below = the method (the three-part lens, flag-don't-assert, the
-  counter-reflex lines). Reproduce it VERBATIM in every block. NEVER trim it as
-  "redundant" — each line overrides a model instinct to do less; trimming quietly
-  reopens the narrowing it beat back (DEV_RULES v4.1.0).
-- Do NOT manufacture a persona ("you are a senior engineer…") — lead with the
-  task + lens; the model gets the role from context.
-- The ledger is SHARED ONCE (B/C/D run in Claude Code at 1M with this whole file
-  in context). Re-inline it per-block ONLY for a no-shared-context cold-A web paste.
+- SELF-CONTAINED BLOCKS — the load-bearing rule. The `gate` courier extracts ONLY the fenced
+  ``` block under each `## Angle X —` header and sends it verbatim to a FRESH, no-context
+  reviewer (gate inlines the four core docs separately, above the block). So every block must be
+  fully PASTE-READY on its own. Wherever a bracket below reads "[THE REVIEW LENS — verbatim]",
+  "[THE SETTLED BASE — verbatim]", or names the ledger, EXPAND THE FULL TEXT INLINE at that spot.
+  NEVER leave a bracket, a "[paste … from above]" note, or "you have this whole file in context"
+  — the reviewer receives ONLY this block; anything not inlined never reaches it (this is the bug
+  that starved a cold-A into a rubber-stamp). It is also what lets Sean paste any single block by hand.
+- THE FULL LEDGER is inlined in EVERY block — it costs nothing per reviewer (each gets exactly one
+  block). Keep ALL FOUR angle blocks present and current every round (fold each round's new ledger
+  entries into every block), even while only some run this round — they must be ready when their phase arrives.
+- STATIC prose below = the method (the three-part lens, flag-don't-assert, the counter-reflex
+  lines). Reproduce it VERBATIM in every block. NEVER trim it as "redundant" — each line overrides
+  a model instinct to do less; trimming quietly reopens the narrowing it beat back (DEV_RULES v4.1.0).
+- OUTPUT CONTRACT, ending every block: the reviewer RETURNS its findings as its reply — it does
+  NOT write a file (the courier saves the reply). And a review that finds NOTHING is suspect: a
+  real build always has polish / non-breaking items, and even READY TO BUILD ships with them
+  ("nothing to find" reads as "didn't look", not "perfect").
+- Do NOT manufacture a persona ("you are a senior engineer…") — lead with the task + lens.
 - Verdict is a TRICHOTOMY everywhere: READY TO BUILD / NEEDS ANOTHER PASS /
   NEEDS ANOTHER PASS (NARROW).
 - MACHINE CONTRACT (the `gate` engine parses this — keep it stable): each angle's
@@ -20,7 +31,7 @@ RULES FOR THE GENERATOR:
   gate extracts that block verbatim and inlines the four core docs above it. Optional
   explicit <!-- GATE:PROMPT:X --> … <!-- /GATE:PROMPT:X --> markers around the block are
   honored first. gate derives the docs + versions from the IMPLEMENT path (not this prose).
-- Canonical worked example: everlastings-website/.../v3_2/v3_2_3_REVIEW_PROMPTS.md
+- Canonical worked example (fully self-contained per block): everlastings-website/.../v3_1/v3_1_7_REVIEW_PROMPTS.md
 ============================================================================ -->
 
 # {{VERSION}} — Gap-review prompts ({{GATE_STATUS_SUMMARY}})
@@ -29,7 +40,7 @@ RULES FOR THE GENERATOR:
 
 **The build under review** = {{BUILD_DOCS}} ({{BUILD_DESCRIPTION}}). The IMPLEMENT **and every addendum are ONE build; every addendum is always in scope.** Effort: **maximum**. **A new instance per pass** (no context contamination). Reviewers change **NOTHING** — output is findings only, written to the named `GAP_REVIEW` file.
 
-**What to hand each angle:** **A** = the docs ONLY, **NO repo** (the absence is the point). **B / C / D** = the whole repo + the docs + **this file** (the shared ledger must be in context). **C** also reads {{ARCH_DOC}} first; **D** also reads {{DESIGN_SOURCES}}. An optional final cold-A holistic pass (after B/C/D clean) gets the docs only, no repo.
+**What to hand each angle:** **A** = the docs ONLY, **NO repo** (the absence is the point). **B / C / D** = the whole repo + the docs. **C** also reads {{ARCH_DOC}} first; **D** also reads {{DESIGN_SOURCES}}. An optional final cold-A holistic pass (after B/C/D clean) gets the docs only, no repo. (Every reviewer receives only its own self-contained angle block — the courier delivers that block plus the four core docs, so the ledger + lens live INSIDE the block, never "assumed in context.")
 
 ---
 
@@ -59,13 +70,13 @@ The current system — everything in {{ARCH_DOC}} and present in the repo today 
 ```
 Pre-build gap review. Effort: maximum. Do NOT change anything — your only output is findings (write them to {{GAP_REVIEW_A}}, or print the full file contents if you have no filesystem).
 
-[THE REVIEW LENS — all three parts, verbatim from above]
-[READ IN FULL · CO-DESIGN · FLAG-DON'T-ASSERT — verbatim from above]
-[THE SETTLED BASE — verbatim, if a delta build]
+[THE REVIEW LENS — all three parts, verbatim: INLINE THE FULL TEXT HERE]
+[READ IN FULL · CO-DESIGN · FLAG-DON'T-ASSERT — verbatim: INLINE THE FULL TEXT HERE]
+[THE SETTLED BASE — verbatim: INLINE THE FULL TEXT HERE, if a delta build]
 
 CONTEXT
 - You are given these documents and NO repository: {{DOC_LIST}}. A FRESH agent executes ALL of it {{EXEC_TARGET}}, then tests {{TEST_TARGET}}. "Exclusively executable" = the docs embed the exact current code + exact replacement for every edit, so the builder LOCATES and APPLIES, never DISCOVERS or DECIDES.
-- LANDMINES = the "Settled — do not re-raise" ledger above (you have this whole file in context). Validate each against reality, FLAG-don't-assert, and do NOT re-raise any as a new finding.
+- LANDMINES = the "Settled — do not re-raise" ledger, inlined above IN THIS BLOCK. Validate each against reality, FLAG-don't-assert, and do NOT re-raise any as a new finding.
 
 ANGLE A — cold / out-of-repo. Your lack of a repo is the point. Two jobs:
 1. SELF-CONTAINMENT: every place the builder would have to open a file, guess, recall a library's behavior, or make a decision the docs didn't make — across ALL docs, including the design addendum.
@@ -93,7 +104,7 @@ Pre-build gap review. Effort: maximum. Do NOT change code or docs — output fin
 
 CONTEXT
 - The build = {{DOC_LIST}}. A FRESH agent applies ALL of it to THIS repo, then tests {{TEST_TARGET}}. Every code edit quotes a CURRENT block (locator) + a NEW block. Byte-check the design addendum's DECIDED blocks at the same bar; for render-tuned defaults judge "concrete enough the builder never guesses," not whether it's the final value.
-- LANDMINES = the shared ledger above. Validate against the repo, FLAG-don't-assert, do NOT re-raise.
+- LANDMINES = the "Settled — do not re-raise" ledger, inlined above in this block. Validate against the repo, FLAG-don't-assert, do NOT re-raise.
 
 ANGLE B — fidelity. Open every file the plan edits and verify: every CURRENT block matches the working tree BYTE-FOR-BYTE (line numbers are hints; the quoted text is the anchor); every NEW block applies cleanly + references only things that exist; {{FIDELITY_CHECKS}}.
 
@@ -118,7 +129,7 @@ Pre-build gap review. Effort: maximum. Do NOT change code or docs — output fin
 
 CONTEXT
 - Read {{ARCH_DOC}} FIRST, then the build docs. A FRESH agent applies the WHOLE build to this repo + tests {{TEST_TARGET}}. DESIGN INTEGRATION IS IN SCOPE (the design edits touch the same files the functional edits touch — check they compose).
-- LANDMINES = the shared ledger above. Validate against reality, FLAG-don't-assert, do NOT re-raise.
+- LANDMINES = the "Settled — do not re-raise" ledger, inlined above in this block. Validate against reality, FLAG-don't-assert, do NOT re-raise.
 
 ANGLE C — integration. Hunt system-fit gaps through the lens: a locally-correct edit that, in the wider system, makes a capability fail or leak, or breaks a render. {{INTEGRATION_CHECKS}}.
 
@@ -139,7 +150,7 @@ Pre-build gap + design review. Effort: maximum. Do NOT change code or docs — o
 
 CONTEXT
 - Read {{DESIGN_ADDENDUM}} + the parts of the IMPLEMENT it depends on + the repo's relevant render surfaces + {{DESIGN_SOURCES}}. The bar: design ships as concrete-default + render-tune — judge "concrete enough to build + correct + accessible," NOT final pixels.
-- LANDMINES = the shared ledger above. Validate against reality, FLAG-don't-assert, do NOT re-raise.
+- LANDMINES = the "Settled — do not re-raise" ledger, inlined above in this block. Validate against reality, FLAG-don't-assert, do NOT re-raise.
 
 ANGLE D — design-correctness. You are the lens A (no repo) and B/C (fidelity/integration) under-weight: does the UI actually RENDER right, is it ACCESSIBLE (reduced-motion, screen-reader), RESPONSIVE, and does it MATCH the design addendum? The "columns-bug" class is your home turf — a spec that applies cleanly but renders wrong/incomplete (e.g. removing an inline style assuming a stylesheet rule wins the cascade — does that rule exist and win?). {{DESIGN_CHECKS}}.
 
