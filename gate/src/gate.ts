@@ -161,6 +161,9 @@ const HELP = `gate <IMPLEMENT-path> [flags]
   Phase / loop:
     --phase A|BCD|all         which angles to start (default all -> cold-A first)
     --phase-a  --phase-bcd    hyphenated aliases for the above
+    --consolidate             enter at the clean-up-read step: condense the doc (own patch +
+                              breadth), then continue into the loop's final cold-A pass
+    --compact-first           with --consolidate: compact the orchestrator before condensing
     --max-rounds N            safety cap (default 12)
     --dry-run                 resolve + parse + report resolved models/effort; spawn nothing (no spend)
 
@@ -343,6 +346,58 @@ async function runReviewer(a: { key: string; repo: boolean }, prompt: string, re
   });
 }
 
+// ── Orchestrator turns (fold's siblings) ─────────────────────────────────────
+// Where the current living IMPLEMENT is on disk, given a control payload.
+function implFromPayload(p: FoldPayload): string {
+  const dir = p.archiveDir ? path.resolve(p.archiveDir) : path.dirname(path.resolve(p.reviewPromptsPath));
+  const byPrompts = path.join(dir, path.basename(p.reviewPromptsPath).replace(/_REVIEW_PROMPTS\.md$/i, "_IMPLEMENT.md"));
+  return fs.existsSync(byPrompts) ? byPrompts : path.join(dir, `${p.version}_IMPLEMENT.md`);
+}
+
+// Drive the orchestrator's self-authored /compact on its own resumed session.
+async function compactForward(compactArg: string | undefined): Promise<void> {
+  if (!compactArg?.trim() || !orchSession) return;
+  const s = new Spinner();
+  s.begin(`compacting the orchestrator forward`);
+  const c = await runQuery({ prompt: `/compact ${compactArg.trim()}`, resume: orchSession, model: orchModel, cwd: repoRoot, permissionMode: HEADLESS });
+  s.end(`  compacted forward${c.isError && !c.rateLimited ? " (⚠ compact returned an error — check context growth)" : ""}`);
+  haltIfLimited(c);
+}
+
+// The CONSOLIDATE step (DEV_RULES §End-game "Clean-up read") — a DISTINCT orchestrator turn,
+// separate from the fold: end-to-end read → condense → its OWN patch bump → breadth subagents
+// again (critical: a condense is where content can be dropped) → regenerate the final narrow
+// cold-A prompt. No `_2.md` pre-condense copy (the rigor trail lives in the standing GAP_REVIEW
+// files, not inline notes). Returns the new control payload (nextAngles = [A] on the clean doc).
+async function consolidateStep(currentImpl: string): Promise<FoldPayload | undefined> {
+  if (!orchSession) die("consolidate needs the orchestrator session — pass --orchestrator-id <uuid> or ensure the titled thread exists.");
+  if (!fs.existsSync(currentImpl)) die(`consolidate: current IMPLEMENT not on disk: ${currentImpl}`);
+  const kb = (fs.statSync(currentImpl).size / 1024).toFixed(0);
+  const prompt = [
+    `You are resuming as the Build-Guide Planning Orchestrator (your own thread). This is the CONSOLIDATE step (DEV_RULES §End-game "Clean-up read") for ${currentImpl} — a DISTINCT step from a normal fold, with its own PATCH bump.`,
+    `The IMPLEMENT is ~${kb} KB after many surgical folds and needs its clean-up read BEFORE the presumed-final cold-A pass.`,
+    `1) Do a deliberate END-TO-END read of the IMPLEMENT + both addenda FROM DISK. Catch stray/outdated/superseded references, duplicated or contradictory notes, and archaeology left by round-after-round edits.`,
+    `2) CONSOLIDATE / condense: tighten and de-bloat WITHOUT dropping any executable content (byte-exact CURRENT anchors, NEW blocks, confirmed decisions). Do NOT keep a pre-condense _2.md copy — the rigor trail lives in the standing GAP_REVIEW files, not inline notes.`,
+    `3) Drive a PATCH bump for the consolidation (a version distinct from the fold's).`,
+    `4) Re-run the 2-subagent breadth pass on the CONSOLIDATED doc — critical: a condense is exactly where content can be accidentally dropped, so the breadth pass verifies the doc is still intact.`,
+    `5) Regenerate the REVIEW_PROMPTS with the final narrow cold-A prompt against the consolidated version. Set nextAngles to exactly [{"key":"A","repo":false}].`,
+    `Then WRITE your forward /compact instruction as compactArg. Return ONLY the structured control payload.`,
+  ].join("\n\n");
+  const s = new Spinner();
+  s.begin(`consolidating (clean-up read) — orchestrator (${orchModel} ${orchEffort})`);
+  const r = await runQuery({
+    prompt, model: orchModel, effort: orchEffort, cwd: repoRoot, resume: orchSession,
+    permissionMode: HEADLESS, settingSources: ["user", "project", "local"],
+    jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
+  });
+  s.end();
+  haltIfLimited(r);
+  const payload = r.structuredOutput as FoldPayload | undefined;
+  if (payload) console.log(`  consolidated → ${payload.version}${payload.gateStatus ? `  (${payload.gateStatus})` : ""}`);
+  else console.error(`  ⚠ consolidate returned no structured payload:\n${r.result.slice(0, 800)}`);
+  return payload;
+}
+
 // ── The run ──────────────────────────────────────────────────────────────────
 // Expand --flag=value into --flag value so no value-flag ever needs a space
 // (--max-rounds=8, --orchestrator-effort=high, --reviewers=opus-4-7, …). Boolean/convenience
@@ -372,6 +427,8 @@ const phase = resolvePhase();
 const maxRounds = Number(arg("--max-rounds") ?? 12);
 const orchTitle = arg("--orchestrator-title") ?? DEFAULT_ORCH_TITLE;
 const dryRun = process.argv.includes("--dry-run"); // resolve + parse + report, spawn nothing
+const consolidateMode = rawArgs.includes("--consolidate"); // enter at the clean-up-read step
+const compactFirst = rawArgs.includes("--compact-first");  // compact the orchestrator before consolidating
 const ov = parseOverrides(rawArgs);
 const orchModel = ov.orchModel ?? ORCHESTRATOR.model;
 const orchEffort = ov.orchEffort ?? ORCHESTRATOR.effort;
@@ -419,7 +476,24 @@ if (dryRun) {
     console.log(`  Angle ${key}: ${p ? `✓ found (${p.length} chars)` : "— not present"}`);
   }
   console.log(`\nwould run this round: [${active.map((a) => `${a.key}${a.repo ? "" : " no-repo"}`).join(", ")}]`);
+  if (consolidateMode) console.log(`\n--consolidate: would run the clean-up-read step on ${path.basename(coreDocs[0].path)} first${compactFirst ? " (after a compact-forward)" : ""}, then continue the loop on the cleaned doc.`);
   process.exit(0);
+}
+
+// Enter at the CONSOLIDATE step (pick up mid-workflow), then fall into the normal loop on the
+// cleaned doc. This is "resume at step 3": fold already happened; do clean-up read → final cold-A.
+if (consolidateMode) {
+  if (!orchSession) die("--consolidate needs the orchestrator — pass --orchestrator-id <uuid> or ensure the titled thread exists under the repo.");
+  if (compactFirst) await compactForward(`Clearing context before the consolidate step. The doc is re-read end-to-end from disk, so keep only the gate/versioning state, the "Settled — do not re-raise" ledger, and standing decisions.`);
+  const cons = await consolidateStep(coreDocs[0].path);
+  if (!cons) die("consolidate returned no structured payload — nothing to continue from.");
+  await compactForward(cons.compactArg);
+  reviewPromptsPath = path.resolve(cons.reviewPromptsPath);
+  archiveDir = cons.archiveDir ? path.resolve(cons.archiveDir) : path.dirname(reviewPromptsPath);
+  const consImpl = implFromPayload(cons);
+  if (fs.existsSync(consImpl)) coreDocs = resolveCoreDocs(consImpl, repoRoot);
+  active = cons.nextAngles?.length ? cons.nextAngles : [{ key: "A", repo: false }];
+  console.log(`\n▶ consolidated to ${cons.version}; continuing into the loop with [${active.map((a) => a.key).join(", ")}] on the cleaned doc.`);
 }
 
 for (let round = 1; round <= maxRounds; round++) {
@@ -461,13 +535,11 @@ for (let round = 1; round <= maxRounds; round++) {
   // 3) Fold. Resume Sean's orchestrator; it validates + folds + bumps + regenerates + self-compacts.
   if (!orchSession) die("findings need folding but no orchestrator session — re-run with --orchestrator-id <uuid>.");
   const anyNarrow = Object.values(findings).some((f) => f.verdict === "NARROW");
-  const implKb = (fs.statSync(coreDocs[0].path).size / 1024).toFixed(0);
   const foldPrompt = [
     `You are resuming as the Build-Guide Planning Orchestrator (your own thread) for the gap-review gate on ${implAbs}.`,
     `Round ${round} findings are written to disk: ${Object.entries(findings).map(([k, f]) => `${k}=${f.file} (${f.verdict})`).join(", ")}.`,
     `Per DEV_RULES §The Gap-Review Gate: VALIDATE each finding against reality (flag-don't-assert — verify before folding; do NOT fold a finding that is a DECISION — a north-star / architecture / genuinely-unclear call — surface it instead).`,
-    `Fold the real ones into the IMPLEMENT + addenda, bump the version, update the "Settled — do not re-raise" ledger (replace superseded entries, never append a contradiction), run the 2-subagent breadth pass, and regenerate the REVIEW_PROMPTS (scoped + narrowed re-prompt for any passed angle whose lane a fold touched; omit angles that stay closed).`,
-    ...(anyNarrow ? [`CONVERGENCE / CLEAN-UP READ — an angle returned NEEDS ANOTHER PASS (NARROW), so the loop is in its last stretch. Per DEV_RULES §End-game cleanup ("Clean-up read, before the suspected last NARROW pass"): the IMPLEMENT is now ~${implKb} KB and round-after-round surgical edits leave stray/outdated references. Do a deliberate END-TO-END read to catch them and CONDENSE the doc before regenerating the final narrow prompt, so the next cold pass reviews the clean version. A condense is a BIG REWRITE, not a normal fold — FIRST copy a diffable pre-condense snapshot to \`<same-version>_IMPLEMENT_2.md\` (carve-out #1, so no inline human notes are lost), THEN condense + bump, THEN re-run the breadth pass. Skip only if you judge the doc already tight.`] : []),
+    `Fold the real ones into the IMPLEMENT + addenda, bump the version (PATCH), update the "Settled — do not re-raise" ledger (replace superseded entries, never append a contradiction), run the 2-subagent breadth pass, and regenerate the REVIEW_PROMPTS (scoped + narrowed re-prompt for any passed angle whose lane a fold touched; omit angles that stay closed).`,
     `Then WRITE your own forward /compact instruction (what the NEXT round must keep) and return it as compactArg.`,
     `Return ONLY the structured control payload.`,
   ].join("\n\n");
@@ -505,14 +577,17 @@ for (let round = 1; round <= maxRounds; round++) {
     payload = (fold.structuredOutput as FoldPayload | undefined) ?? payload;
   }
 
-  // 5) File-drop compaction — drive the orchestrator's self-authored /compact on its own session.
-  if (payload.compactArg?.trim()) {
-    const compactSpin = new Spinner();
-    compactSpin.begin(`compacting the orchestrator forward`);
-    const c = await runQuery({ prompt: `/compact ${payload.compactArg.trim()}`, resume: orchSession, model: orchModel, cwd: repoRoot, permissionMode: HEADLESS });
-    compactSpin.end(`  compacted forward${c.isError && !c.rateLimited ? " (⚠ compact returned an error — check context growth)" : ""}`);
-    haltIfLimited(c);
+  // 4.5) CONSOLIDATE (distinct step). A NARROW verdict means the loop is converging → run the
+  //      clean-up-read turn on the just-folded doc (its own patch + its own breadth pass), so the
+  //      presumed-final cold-A pass reviews the cleaned version. This is step 3 of the 4-step
+  //      NARROW protocol (fold → consolidate → final A), wired so it never needs a human's eyes.
+  if (anyNarrow) {
+    const cons = await consolidateStep(implFromPayload(payload));
+    if (cons) payload = cons;
   }
+
+  // 5) File-drop compaction — drive the orchestrator's self-authored /compact on its own session.
+  await compactForward(payload.compactArg);
 
   // 6) Follow the orchestrator to the next round's docs + angles.
   reviewPromptsPath = path.resolve(payload.reviewPromptsPath);
@@ -526,4 +601,4 @@ for (let round = 1; round <= maxRounds; round++) {
 }
 
 console.log(`\nDone. GAP_REVIEW + REVIEW_PROMPTS files are in ${archiveDir}`);
-console.log("(First SDK cut — foundation gates proven; phase A→B/C/D transition and Build Guide Final Cuts are the next hardening pass, driven with the orchestrator during the pilot.)");
+console.log("(NARROW→consolidate is wired; the phase A→B/C/D directory handoff and final Build Guide Cuts are the remaining end-game steps — see NEXT_UPDATE.md.)");
