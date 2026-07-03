@@ -19,7 +19,17 @@ Newest at top. When one ships, move it to a "Done" note in the README/commit and
 
 ---
 
-## 2. `gate --resume` — full checkpoint-based resume
+## 2. End-game orchestration — condense, phase handoff, final cuts (the deferred PILOT-HARDEN)
+
+**Context (v3_6 pilot):** the A cycle bloated to a 283 KB / ~81k-token IMPLEMENT and never got its clean-up read, then the rate limit cut it off before A reached READY. Two of the three end-game steps were never wired into the engine (they carried a `PILOT-HARDEN: driven by hand` comment). DEV_RULES §End-game cleanup + §Versioning ("demarcate phases with a MINOR bump") is the spec.
+
+- **(a) Condense-on-NARROW — PARTIALLY DONE.** The fold prompt now instructs the orchestrator, on any NARROW verdict, to do the DEV_RULES "Clean-up read" (end-to-end read → condense, keeping a diffable `…_IMPLEMENT_2.md` pre-condense copy per carve-out #1) before regenerating the final narrow prompt. **Still to verify live** that the orchestrator actually performs it under load and that the doc shrinks.
+- **(b) Phase-transition directory handoff — NOT DONE.** When an angle-type's cycle clears (e.g. cold-A all READY), gate currently just `break`s. It should instead drive the orchestrator to: fold the final report (PATCH), then **MINOR-bump + copy** the living docs into a new `vX_(Y+1)/` dir so the next phase (B/C/D) opens with its own directory + patch-trail (DEV_RULES: A-loop lives in `vX.6.*`, B/C/D opens at `vX.7.0`), leaving the terminal GAP_REVIEW records in the old dir. "Don't strand an empty directory" — copy the old dir's final-state living docs if it would otherwise empty out. Then gate re-points at the new dir and continues with the next phase's angles.
+- **(c) Build Guide Final Cuts — NOT DONE.** After ALL angles (A + B/C/D) verdict READY: drive the orchestrator to strip provenance/changelog/gap-review framing, move long rationale to a sibling `…_RATIONALE.md`, and **MAJOR-bump** (plan → execution). This is the plan's exit.
+
+Design note: gate should decide *phase-clear vs whole-gate-clear* from the fold payload's `nextAngles` (empty + which phase just ran), and the orchestrator owns the actual copy/renumber/header work (it manages versioning) — gate just triggers the step and follows the new paths. Likely wants a small `endGame` field on FOLD_SCHEMA so the orchestrator reports which handoff it performed and the new dir/version.
+
+## 3. `gate --resume` — full checkpoint-based resume
 
 **Context:** the graceful limit-halt (shipped) prints the correct current-version path to re-run, but the human still retypes the path + flags and picks the band. Under the tightened Max meter, hitting a limit mid-gate is now common, so resume should be one command.
 

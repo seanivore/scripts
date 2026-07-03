@@ -460,11 +460,14 @@ for (let round = 1; round <= maxRounds; round++) {
 
   // 3) Fold. Resume Sean's orchestrator; it validates + folds + bumps + regenerates + self-compacts.
   if (!orchSession) die("findings need folding but no orchestrator session — re-run with --orchestrator-id <uuid>.");
+  const anyNarrow = Object.values(findings).some((f) => f.verdict === "NARROW");
+  const implKb = (fs.statSync(coreDocs[0].path).size / 1024).toFixed(0);
   const foldPrompt = [
     `You are resuming as the Build-Guide Planning Orchestrator (your own thread) for the gap-review gate on ${implAbs}.`,
     `Round ${round} findings are written to disk: ${Object.entries(findings).map(([k, f]) => `${k}=${f.file} (${f.verdict})`).join(", ")}.`,
-    `Per DEV_RULES v4.1.0 §The Gap-Review Gate: VALIDATE each finding against reality (flag-don't-assert — verify before folding; do NOT fold a finding that is a DECISION — a north-star / architecture / genuinely-unclear call — surface it instead).`,
+    `Per DEV_RULES §The Gap-Review Gate: VALIDATE each finding against reality (flag-don't-assert — verify before folding; do NOT fold a finding that is a DECISION — a north-star / architecture / genuinely-unclear call — surface it instead).`,
     `Fold the real ones into the IMPLEMENT + addenda, bump the version, update the "Settled — do not re-raise" ledger (replace superseded entries, never append a contradiction), run the 2-subagent breadth pass, and regenerate the REVIEW_PROMPTS (scoped + narrowed re-prompt for any passed angle whose lane a fold touched; omit angles that stay closed).`,
+    ...(anyNarrow ? [`CONVERGENCE / CLEAN-UP READ — an angle returned NEEDS ANOTHER PASS (NARROW), so the loop is in its last stretch. Per DEV_RULES §End-game cleanup ("Clean-up read, before the suspected last NARROW pass"): the IMPLEMENT is now ~${implKb} KB and round-after-round surgical edits leave stray/outdated references. Do a deliberate END-TO-END read to catch them and CONDENSE the doc before regenerating the final narrow prompt, so the next cold pass reviews the clean version. A condense is a BIG REWRITE, not a normal fold — FIRST copy a diffable pre-condense snapshot to \`<same-version>_IMPLEMENT_2.md\` (carve-out #1, so no inline human notes are lost), THEN condense + bump, THEN re-run the breadth pass. Skip only if you judge the doc already tight.`] : []),
     `Then WRITE your own forward /compact instruction (what the NEXT round must keep) and return it as compactArg.`,
     `Return ONLY the structured control payload.`,
   ].join("\n\n");
