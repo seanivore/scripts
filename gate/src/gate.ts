@@ -190,6 +190,45 @@ async function ask(q: string): Promise<string> {
   return a;
 }
 
+// A tiny TTY spinner so long reviewer / fold turns show a heartbeat + elapsed time
+// (a peer query() streams no intermediate output, so without this the terminal looks frozen).
+// Non-TTY (piped, CI) degrades to a single plain line — never spews control codes.
+class Spinner {
+  private frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  private i = 0;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private start = 0;
+  private label = "";
+  private readonly tty = process.stdout.isTTY === true;
+  private elapsed(): string {
+    const s = Math.floor((Date.now() - this.start) / 1000);
+    return s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s` : `${s}s`;
+  }
+  private paint(): void {
+    if (!this.tty) return;
+    this.i = (this.i + 1) % this.frames.length;
+    process.stdout.write(`\r\x1b[2K${this.frames[this.i]} ${this.label}  ${this.elapsed()}`);
+  }
+  begin(label: string): void {
+    this.label = label; this.start = Date.now();
+    if (!this.tty) { console.log(`… ${label}`); return; }
+    this.paint();
+    this.timer = setInterval(() => this.paint(), 90);
+    this.timer.unref?.();
+  }
+  setLabel(label: string): void { this.label = label; if (!this.tty) console.log(`… ${label}`); }
+  log(msg: string): void {                       // emit a permanent line without losing the spinner
+    if (this.tty) process.stdout.write(`\r\x1b[2K`);
+    console.log(msg);
+    if (this.tty && this.timer) this.paint();
+  }
+  end(msg?: string): void {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.tty) process.stdout.write(`\r\x1b[2K`);
+    if (msg) console.log(msg);
+  }
+}
+
 function verdictOf(text: string): "READY" | "NARROW" | "PASS" {
   if (/NEEDS ANOTHER PASS \(NARROW\)/i.test(text)) return "NARROW";
   if (/READY TO BUILD/i.test(text)) return "READY";
@@ -376,9 +415,12 @@ for (let round = 1; round <= maxRounds; round++) {
 
   // 1) Spawn the active reviewers (A alone / B·C·D in parallel), each a fresh peer.
   const findings: Record<string, { verdict: string; file: string }> = {};
+  const pending = new Set(active.map((a) => a.key));
+  const spin = new Spinner();
+  spin.begin(`Round ${round} — reviewing [${active.map((a) => a.key).join(", ")}]`);
   await Promise.all(active.map(async (a) => {
     const anglePrompt = extractAnglePrompt(md, a.key);
-    if (!anglePrompt) die(`could not find the Angle ${a.key} prompt in ${path.basename(reviewPromptsPath)}`);
+    if (!anglePrompt) { spin.end(); die(`could not find the Angle ${a.key} prompt in ${path.basename(reviewPromptsPath)}`); }
     const rModel = ov.reviewerModel[a.key as Angle] ?? REVIEWER.model;
     const rEffort = ov.reviewerEffort ?? REVIEWER.effort;
     const result = await runReviewer(a, withCoreDocs(coreDocs, anglePrompt), repoRoot, rModel, rEffort);
@@ -386,8 +428,11 @@ for (let round = 1; round <= maxRounds; round++) {
     const file = path.join(archiveDir, `${ver}_GAP_REVIEW_${a.key}.md`);
     fs.writeFileSync(file, result);
     findings[a.key] = { verdict: verdictOf(result), file };
-    console.log(`  ${a.key}: ${findings[a.key].verdict}  → ${path.basename(file)}`);
+    pending.delete(a.key);
+    spin.log(`  ${a.key}: ${findings[a.key].verdict}  → ${path.basename(file)}`);
+    spin.setLabel(`Round ${round} — reviewing [${[...pending].join(", ") || "wrapping up"}]`);
   }));
+  spin.end();
 
   // 2) All active angles READY → this phase is clear.
   if (Object.values(findings).every((f) => f.verdict === "READY")) {
@@ -409,6 +454,8 @@ for (let round = 1; round <= maxRounds; round++) {
     `Return ONLY the structured control payload.`,
   ].join("\n\n");
 
+  const foldSpin = new Spinner();
+  foldSpin.begin(`folding round ${round} — orchestrator (${orchModel} ${orchEffort})`);
   let fold = await runQuery({
     prompt: foldPrompt,
     model: orchModel,
@@ -419,6 +466,7 @@ for (let round = 1; round <= maxRounds; round++) {
     settingSources: ["user", "project", "local"],   // its project context: CLAUDE.md/AGENTS.md/DEV_RULES/memory
     jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
   });
+  foldSpin.end();
   let payload = fold.structuredOutput as FoldPayload | undefined;
   if (!payload) die(`orchestrator returned no structured payload:\n${fold.result.slice(0, 1200)}`);
   console.log(`  folded ${payload.foldedCount ?? "?"} → ${payload.version}${payload.gateStatus ? `  (${payload.gateStatus})` : ""}`);
@@ -439,8 +487,10 @@ for (let round = 1; round <= maxRounds; round++) {
 
   // 5) File-drop compaction — drive the orchestrator's self-authored /compact on its own session.
   if (payload.compactArg?.trim()) {
+    const compactSpin = new Spinner();
+    compactSpin.begin(`compacting the orchestrator forward`);
     const c = await runQuery({ prompt: `/compact ${payload.compactArg.trim()}`, resume: orchSession, model: orchModel, cwd: repoRoot, permissionMode: HEADLESS });
-    console.log(`  compacted forward${c.isError ? " (⚠ compact returned an error — check context growth)" : ""}`);
+    compactSpin.end(`  compacted forward${c.isError ? " (⚠ compact returned an error — check context growth)" : ""}`);
   }
 
   // 6) Follow the orchestrator to the next round's docs + angles.
