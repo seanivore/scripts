@@ -56,16 +56,22 @@ const ANGLE_A_SYSTEM_APPEND =
 // authoring ("[paste the ledger from above]") starves the reviewer (the v3.6.4 bug). Injected
 // into every orchestrator turn that regenerates the prompts.
 const PROMPT_CONTRACT =
-  `CRITICAL — write the REVIEW_PROMPTS so the gate courier delivers them intact. gate extracts ONLY the fenced code block under each "## Angle X —" header and sends THAT block verbatim to a fresh, no-context reviewer (gate inlines the four core docs separately, above the block). So EACH angle's fenced block MUST be fully self-contained + paste-ready: inline the COMPLETE current "Settled — do not re-raise" ledger, the full three-part review lens, and the settled-base paragraph directly INTO every block — NEVER a "[paste from above]" / "[LANDMINES …]" / "[REVIEW LENS]" placeholder (the courier sends those as literal text and the reviewer starves, engaging none of the accumulated findings). Keep ALL FOUR angle blocks present and current every round (fold each round's new ledger entries into every block), even while only some run this round — they must be ready when their phase arrives. Reproduce the static method prose verbatim per templates/review-prompt.md; do NOT trim it as "redundant". End each block with the output contract: the reviewer returns findings as its reply (never writes a file), and a review that finds NOTHING is suspect — even READY TO BUILD ships with polish / non-breaking items.`;
+  `CRITICAL — write the REVIEW_PROMPTS so the gate courier delivers them intact. gate extracts ONLY the fenced code block under each "## Angle X —" header and sends THAT block verbatim to a fresh, no-context reviewer (gate inlines the four core docs separately, above the block). So EACH angle's fenced block MUST be fully self-contained + paste-ready: inline the COMPLETE current "Settled — do not re-raise" ledger, the full three-part review lens, and the settled-base paragraph directly INTO every block — NEVER a "[paste from above]" / "[LANDMINES …]" / "[REVIEW LENS]" placeholder LINE (the courier sends those as literal text and the reviewer starves, engaging none of the accumulated findings). Keep ALL FOUR angle blocks present and current every round (fold each round's new ledger entries into every block), even while only some run this round — they must be ready when their phase arrives. Reproduce the static method prose verbatim per templates/review-prompt.md; do NOT trim it as "redundant". End each block with the output contract: the reviewer returns findings as its reply (never writes a file), and a review that finds NOTHING is suspect — even READY TO BUILD ships with polish / non-breaking items. ` +
+  `VALIDATE YOUR OWN OUTPUT before returning: after you write the REVIEW_PROMPTS, RE-READ the whole file top-to-bottom (not only the section you surgically edited — that is exactly how the placeholder bug slipped through), then run \`gate --validate-prompts <absolute path to the REVIEW_PROMPTS file>\` from the repo. If any block FAILS, fix it (inline the full ledger + lens into that block; delete any "[paste …]" directive line) and re-run the check until it reports every block courier-safe. Only then return your payload.`;
 
 // gate couriers ONLY the fenced block under `## Angle X`, so each block MUST be fully
 // self-contained (lens + settled-base + full ledger inlined). Refuse to spawn a reviewer on a
 // block that is still an un-expanded template (placeholder directives) or implausibly thin —
 // fail loud with the cause rather than silently run a starved review (the v3.6.4 bug).
-const PLACEHOLDER_RE = /\[\s*(paste|landmines?|review lens|settled base|ledger)\b|paste\b[^\n]*\b(from above|in full|verbatim|here)\b/i;
+// A placeholder is a STANDALONE directive LINE ("[REVIEW LENS — paste from above]"), never a prose
+// mention — a ledger entry may legitimately quote "[REVIEW LENS]" while describing THIS very bug,
+// so we match line-anchored, never substring, or the ledger's own history trips the guard.
+const PLACEHOLDER_LINE_RE = /^\s*\[\s*(paste|landmines?|(the\s+)?review lens|(the\s+)?settled base|ledger)\b/i;
 function selfContainedIssue(anglePrompt: string): string | null {
-  const hit = anglePrompt.match(PLACEHOLDER_RE);
-  if (hit) return `holds a template placeholder ("${hit[0].trim()}") — the ledger/lens was referenced, not inlined`;
+  for (const l of anglePrompt.split("\n")) {
+    if (PLACEHOLDER_LINE_RE.test(l) || /^\s*\[[^\]]*\bpaste\b[^\]]*\b(from above|in full|verbatim)\b/i.test(l))
+      return `holds a template placeholder line ("${l.trim().slice(0, 48)}…") — the ledger/lens was referenced, not inlined`;
+  }
   if (anglePrompt.length < 2000) return `is only ${anglePrompt.length} chars — implausibly thin for a self-contained block (lens + settled-base + ledger + charge)`;
   return null;
 }
@@ -220,6 +226,9 @@ const HELP = `gate <IMPLEMENT-path> [flags]
                               <!-- GATE:FINAL_BUMP: … --> marker at the top of the IMPLEMENT)
     --max-rounds N            safety cap (default 12)
     --dry-run                 resolve + parse + report resolved models/effort; spawn nothing (no spend)
+    --validate-prompts <p>    check a REVIEW_PROMPTS.md: are all four angle blocks courier-safe
+                              (self-contained, no "[paste …]" lines)? exit 0/1. (the orchestrator
+                              runs this on its own output; you can too.)
 
   Model down-shift (default = latest Opus):
     --<model>-reviewers               all reviewers -> <model>   e.g. --opus-4-7-reviewers
@@ -339,6 +348,41 @@ function sliceUnderHeader(md: string, key: string): string | undefined {
   const rest = md.slice(start);
   const nx = rest.search(/^##\s/m);
   return nx >= 0 ? rest.slice(0, nx) : rest;
+}
+
+// Pull one `## Header …` section BODY (down to the next `## ` header) out of the preamble.
+function extractSection(md: string, headerRe: RegExp): string | undefined {
+  const lines = md.split("\n");
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i]) && headerRe.test(lines[i]) && !/^##\s*Angle\b/i.test(lines[i])) { start = i + 1; break; }
+  }
+  if (start < 0) return undefined;
+  let end = lines.length;
+  for (let i = start; i < lines.length; i++) if (/^##\s/.test(lines[i])) { end = i; break; }
+  return lines.slice(start, end).join("\n").replace(/^\s*---\s*$/gm, "").trim() || undefined;
+}
+
+// THE DURABLE FIX for the starvation bug: gate does NOT depend on the orchestrator inlining the
+// ledger/lens into each block (a resumed thread keeps authoring DRY out of habit). Instead gate
+// EXPANDS any placeholder the orchestrator left — "[REVIEW LENS …]", "[SETTLED BASE …]",
+// "[LANDMINES …]" — by substituting the real section from the file's own preamble, so the couriered
+// block is always self-contained regardless of the orchestrator's authoring style. Returns the
+// expanded block + the count of refs it resolved (for logging / dry-run).
+function expandBlock(block: string, md: string): { text: string; expanded: number } {
+  const lens = extractSection(md, /review lens/i);
+  const base = extractSection(md, /settled base/i);
+  const ledger = extractSection(md, /do not re-raise/i);
+  let expanded = 0;
+  const sub = (line: string): string | null => {
+    if (/^\s*\[\s*(the\s+)?review lens\b/i.test(line) && lens) { expanded++; return lens; }
+    if (/^\s*\[\s*(the\s+)?settled base\b/i.test(line) && base) { expanded++; return base; }
+    if ((/^\s*\[\s*landmines?\b/i.test(line) || /^\s*\[[^\]]*\bledger\b/i.test(line)) && ledger) { expanded++; return ledger; }
+    if (/^\s*\[\s*read in full\b/i.test(line) && lens) { expanded++; return ""; } // part (c) already lives in the lens we inlined
+    return null;
+  };
+  const text = block.split("\n").map((l) => { const r = sub(l); return r === null ? l : r; }).join("\n");
+  return { text, expanded };
 }
 
 // Resolve the four core docs from the IMPLEMENT path + the project doc. Validates existence.
@@ -636,6 +680,34 @@ const rawArgs = process.argv.slice(2);
 if (rawArgs.length === 0 || rawArgs.includes("--help") || rawArgs.includes("-h")) { console.log(HELP); process.exit(0); }
 if (rawArgs.includes("--demo-ui")) { await demoProgress(); process.exit(0); } // zero-spend preview of the live progress view
 
+// SELF-CHECK the orchestrator can run on its own regenerated REVIEW_PROMPTS (Sean's idea) — same
+// courier-safety logic gate uses, so there's no drift. Exit 0 if every present block is safe, 1 if not.
+{
+  const vi = rawArgs.indexOf("--validate-prompts");
+  if (vi >= 0) {
+    const p = rawArgs[vi + 1];
+    if (!p || p.startsWith("--")) { console.error("usage: gate --validate-prompts <REVIEW_PROMPTS.md>"); process.exit(2); }
+    const abs = path.resolve(p);
+    if (!fs.existsSync(abs)) { console.error(`gate: not found: ${abs}`); process.exit(2); }
+    const md = fs.readFileSync(abs, "utf8");
+    console.log(`validating ${path.basename(abs)} — each fenced "## Angle X" block must be courier-safe (self-contained; the full ledger + lens inlined; no "[paste …]" placeholder lines):\n`);
+    let bad = 0, present = 0;
+    for (const key of ["A", "B", "C", "D"]) {
+      const raw = extractAnglePrompt(md, key);
+      if (!raw) { console.log(`  Angle ${key}: — not present`); continue; }
+      present++;
+      const { text, expanded } = expandBlock(raw, md);
+      const issue = selfContainedIssue(text);
+      if (issue) { bad++; console.log(`  Angle ${key}: ✗ FAIL — ${issue}`); }
+      else console.log(`  Angle ${key}: ✓ ok (${text.length} chars${expanded ? `; ${expanded} preamble ref(s) gate will expand` : ""})`);
+    }
+    console.log(bad
+      ? `\n✗ ${bad} block(s) would starve a fresh reviewer. Inline the FULL ledger + lens + settled-base into each failing block (no "[paste from above]" line), then re-run this check.`
+      : present ? `\n✓ all ${present} block(s) courier-safe.` : `\n(no angle blocks found)`);
+    process.exit(bad || !present ? 1 : 0);
+  }
+}
+
 const implPath = process.argv[2];
 if (!implPath || implPath.startsWith("--")) die("usage: gate <IMPLEMENT-path> [flags]  (try --help)");
 const implAbs = path.resolve(implPath);
@@ -684,10 +756,11 @@ let active: Array<{ key: string; repo: boolean }> =
 console.log(`▶ ${path.basename(implAbs)} — phase ${phase}, repo ${repoRoot}`);
 
 // QA pre-flight runs before the loop when: asked (--qa), bootstrapping (no prompts yet), or the
-// block gate is about to run is an un-expanded template (self-heal the v3.6.4-style starvation).
+// active block is broken EVEN AFTER gate expands the preamble refs (i.e. the preamble itself lacks
+// the ledger/lens — a genuinely broken file, not just DRY authoring gate can fix on its own).
 const activeBlockBroken = promptsExist && ((): boolean => {
   const md = fs.readFileSync(reviewPromptsPath, "utf8");
-  return active.some((a) => { const b = extractAnglePrompt(md, a.key); return !b || !!selfContainedIssue(b); });
+  return active.some((a) => { const b = extractAnglePrompt(md, a.key); return !b || !!selfContainedIssue(expandBlock(b, md).text); });
 })();
 const runQa = qaMode || !promptsExist || activeBlockBroken;
 
@@ -714,8 +787,10 @@ if (dryRun) {
     for (const key of ["A", "B", "C", "D"]) {
       const p = extractAnglePrompt(md, key);
       if (!p) { console.log(`  Angle ${key}: — not present`); continue; }
-      const issue = selfContainedIssue(p);
-      console.log(`  Angle ${key}: ✓ found (${p.length} chars)${issue ? `  ⚠ WOULD BE REJECTED — ${issue}` : `  ✓ self-contained`}`);
+      const { text, expanded } = expandBlock(p, md);
+      const issue = selfContainedIssue(text);
+      const exp = expanded ? `, +${expanded} preamble ref(s) expanded by gate → ${text.length} chars` : "";
+      console.log(`  Angle ${key}: ✓ found (${p.length} chars)${exp}${issue ? `  ⚠ WOULD BE REJECTED — ${issue}` : `  ✓ courier-safe`}`);
     }
   }
   if (runQa) console.log(`\nQA pre-flight WOULD RUN first (${qaMode ? "--qa" : !promptsExist ? "no prompts → bootstrap" : "active block is an un-expanded template → self-heal"}), then the loop.`);
@@ -768,12 +843,20 @@ for (let round = 1; round <= maxRounds; round++) {
   const spin = new Spinner();
   spin.begin(`Round ${round} — reviewing [${active.map((a) => a.key).join(", ")}]`);
   await Promise.all(active.map(async (a) => {
-    const anglePrompt = extractAnglePrompt(md, a.key);
-    if (!anglePrompt) { spin.end(); die(`could not find the Angle ${a.key} prompt in ${path.basename(reviewPromptsPath)}`); }
-    if (selfContainedIssue(anglePrompt)) { spin.end(); assertSelfContained(anglePrompt, a.key); } // never courier a starved block
+    const rawBlock = extractAnglePrompt(md, a.key);
+    if (!rawBlock) { spin.end(); die(`could not find the Angle ${a.key} prompt in ${path.basename(reviewPromptsPath)}`); }
+    const { text: anglePrompt, expanded } = expandBlock(rawBlock, md);  // gate inlines the ledger/lens itself — never trusts the orchestrator to
+    if (expanded) spin.log(`  ${a.key}: expanded ${expanded} preamble ref(s) into the block (courier-safe)`);
+    if (selfContainedIssue(anglePrompt)) { spin.end(); assertSelfContained(anglePrompt, a.key); } // only fires if the PREAMBLE also lacks it
     const rModel = ov.reviewerModel[a.key as Angle] ?? REVIEWER.model;
     const rEffort = ov.reviewerEffort ?? REVIEWER.effort;
-    const rr = await runReviewer(a, withCoreDocs(coreDocs, anglePrompt + REVIEWER_OUTPUT_FOOTER), repoRoot, rModel, rEffort);
+    const fullPrompt = withCoreDocs(coreDocs, anglePrompt + REVIEWER_OUTPUT_FOOTER);
+    try {                                             // drop a paste-ready copy for Sean / debugging (best-effort)
+      const sentDir = path.join(archiveDir, ".sent");
+      fs.mkdirSync(sentDir, { recursive: true });
+      fs.writeFileSync(path.join(sentDir, `${path.basename(reviewPromptsPath).replace(/_REVIEW_PROMPTS\.md$/i, "")}_${a.key}.prompt.txt`), fullPrompt);
+    } catch { /* .sent dump is best-effort */ }
+    const rr = await runReviewer(a, fullPrompt, repoRoot, rModel, rEffort);
     haltIfLimited(rr);                               // a limit mid-round exits cleanly, not with a stack trace
     const result = rr.result;
     const ver = path.basename(reviewPromptsPath).replace(/_REVIEW_PROMPTS\.md$/i, "");
