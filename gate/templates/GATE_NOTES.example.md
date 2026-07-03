@@ -23,6 +23,13 @@ project_doc: assets/docs/EVERLASTINGS_STORE.md
   implementation orchestrator executes from.
 - Leave at least the final versioned docs in each `vX_Y/` dir — never an empty dir.
 
+**Per-build FINAL bump intent — record it at the TOP of the IMPLEMENT, not here.** The size of the
+*final* bump (after B/C/D clears) is knowable before the gate runs and is per-build (this one major,
+the next maybe minor), so it belongs in the IMPLEMENT header, e.g.:
+`<!-- GATE:FINAL_BUMP: major — admin-panel rebuild; all functionality now drivable in dashboard + GPT -->`
+gate reads it (and echoes it in `--dry-run`); `--final-bump major|minor` overrides; absent → the
+orchestrator decides per the doc (MAJOR for an architectural/deployment change, MINOR for a delta).
+
 ## Anything else the orchestrator should hold across rounds
 
 <!-- North-star reminders, known problem areas, project-specific landmine conventions, etc. -->

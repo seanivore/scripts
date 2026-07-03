@@ -164,6 +164,8 @@ const HELP = `gate <IMPLEMENT-path> [flags]
     --consolidate             enter at the clean-up-read step: condense the doc (own patch +
                               breadth), then continue into the loop's final cold-A pass
     --compact-first           with --consolidate: compact the orchestrator before condensing
+    --final-bump major|minor  the final version bump after B/C/D clears (overrides the
+                              <!-- GATE:FINAL_BUMP: … --> marker at the top of the IMPLEMENT)
     --max-rounds N            safety cap (default 12)
     --dry-run                 resolve + parse + report resolved models/effort; spawn nothing (no spend)
 
@@ -346,12 +348,29 @@ async function runReviewer(a: { key: string; repo: boolean }, prompt: string, re
   });
 }
 
-// ── Orchestrator turns (fold's siblings) ─────────────────────────────────────
+// ── Orchestrator turns (fold + its end-game siblings) ────────────────────────
+type Findings = Record<string, { verdict: string; file: string }>;
+
 // Where the current living IMPLEMENT is on disk, given a control payload.
 function implFromPayload(p: FoldPayload): string {
   const dir = p.archiveDir ? path.resolve(p.archiveDir) : path.dirname(path.resolve(p.reviewPromptsPath));
   const byPrompts = path.join(dir, path.basename(p.reviewPromptsPath).replace(/_REVIEW_PROMPTS\.md$/i, "_IMPLEMENT.md"));
   return fs.existsSync(byPrompts) ? byPrompts : path.join(dir, `${p.version}_IMPLEMENT.md`);
+}
+
+// Run ONE schema'd orchestrator turn (resume the thread) with a heartbeat + clean limit-halt.
+async function orchTurn(prompt: string, label: string): Promise<FoldPayload | undefined> {
+  if (!orchSession) die("orchestrator turn needs a session — pass --orchestrator-id <uuid> or ensure the titled thread exists.");
+  const s = new Spinner();
+  s.begin(label);
+  const r = await runQuery({
+    prompt, model: orchModel, effort: orchEffort, cwd: repoRoot, resume: orchSession,
+    permissionMode: HEADLESS, settingSources: ["user", "project", "local"],   // its project context: CLAUDE.md/AGENTS.md/DEV_RULES/memory
+    jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
+  });
+  s.end();
+  haltIfLimited(r);
+  return r.structuredOutput as FoldPayload | undefined;
 }
 
 // Drive the orchestrator's self-authored /compact on its own resumed session.
@@ -364,13 +383,44 @@ async function compactForward(compactArg: string | undefined): Promise<void> {
   haltIfLimited(c);
 }
 
+// Human decision-pause — the loop CANNOT fold a judgment call without Sean. Loops until the
+// human's answers leave no decision unresolved (a re-fold can surface a follow-on decision).
+async function resolveDecisions(payload: FoldPayload): Promise<FoldPayload> {
+  while (payload.decisionsNeeded?.length) {
+    console.log(`\n⏸  ${payload.decisionsNeeded.length} decision(s) need you:`);
+    const answers: string[] = [];
+    for (const d of payload.decisionsNeeded) answers.push(`Q: ${d}\nA: ${await ask(`\n${d}\n> `)}`);
+    const next = await orchTurn(
+      `The human answered:\n\n${answers.join("\n\n")}\n\nFold accordingly, regenerate the REVIEW_PROMPTS, and return the same structured payload shape.`,
+      `re-folding after your decisions`,
+    );
+    payload = next ?? { ...payload, decisionsNeeded: [] };
+  }
+  return payload;
+}
+
+// Normal fold turn — validate + fold findings + breadth + PATCH + regen prompts, then decisions.
+async function foldTurn(findings: Findings, round: number): Promise<FoldPayload> {
+  const foldPrompt = [
+    `You are resuming as the Build-Guide Planning Orchestrator (your own thread) for the gap-review gate on ${implAbs}.`,
+    `Round ${round} findings are written to disk: ${Object.entries(findings).map(([k, f]) => `${k}=${f.file} (${f.verdict})`).join(", ")}.`,
+    `Per DEV_RULES §The Gap-Review Gate: VALIDATE each finding against reality (flag-don't-assert — verify before folding; do NOT fold a finding that is a DECISION — a north-star / architecture / genuinely-unclear call — surface it instead).`,
+    `Fold the real ones into the IMPLEMENT + addenda, bump the version (PATCH), update the "Settled — do not re-raise" ledger (replace superseded entries, never append a contradiction), run the 2-subagent breadth pass, and regenerate the REVIEW_PROMPTS (scoped + narrowed re-prompt for any passed angle whose lane a fold touched; omit angles that stay closed).`,
+    `Then WRITE your own forward /compact instruction (what the NEXT round must keep) and return it as compactArg.`,
+    `Return ONLY the structured control payload.`,
+  ].join("\n\n");
+  let p = await orchTurn(foldPrompt, `folding round ${round} — orchestrator (${orchModel} ${orchEffort})`);
+  if (!p) die(`orchestrator returned no structured payload after the fold.`);
+  console.log(`  folded ${p.foldedCount ?? "?"} → ${p.version}${p.gateStatus ? `  (${p.gateStatus})` : ""}`);
+  return resolveDecisions(p);
+}
+
 // The CONSOLIDATE step (DEV_RULES §End-game "Clean-up read") — a DISTINCT orchestrator turn,
 // separate from the fold: end-to-end read → condense → its OWN patch bump → breadth subagents
 // again (critical: a condense is where content can be dropped) → regenerate the final narrow
 // cold-A prompt. No `_2.md` pre-condense copy (the rigor trail lives in the standing GAP_REVIEW
 // files, not inline notes). Returns the new control payload (nextAngles = [A] on the clean doc).
 async function consolidateStep(currentImpl: string): Promise<FoldPayload | undefined> {
-  if (!orchSession) die("consolidate needs the orchestrator session — pass --orchestrator-id <uuid> or ensure the titled thread exists.");
   if (!fs.existsSync(currentImpl)) die(`consolidate: current IMPLEMENT not on disk: ${currentImpl}`);
   const kb = (fs.statSync(currentImpl).size / 1024).toFixed(0);
   const prompt = [
@@ -383,19 +433,56 @@ async function consolidateStep(currentImpl: string): Promise<FoldPayload | undef
     `5) Regenerate the REVIEW_PROMPTS with the final narrow cold-A prompt against the consolidated version. Set nextAngles to exactly [{"key":"A","repo":false}].`,
     `Then WRITE your forward /compact instruction as compactArg. Return ONLY the structured control payload.`,
   ].join("\n\n");
-  const s = new Spinner();
-  s.begin(`consolidating (clean-up read) — orchestrator (${orchModel} ${orchEffort})`);
-  const r = await runQuery({
-    prompt, model: orchModel, effort: orchEffort, cwd: repoRoot, resume: orchSession,
-    permissionMode: HEADLESS, settingSources: ["user", "project", "local"],
-    jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
-  });
-  s.end();
-  haltIfLimited(r);
-  const payload = r.structuredOutput as FoldPayload | undefined;
+  const payload = await orchTurn(prompt, `consolidating (clean-up read) — orchestrator (${orchModel} ${orchEffort})`);
   if (payload) console.log(`  consolidated → ${payload.version}${payload.gateStatus ? `  (${payload.gateStatus})` : ""}`);
-  else console.error(`  ⚠ consolidate returned no structured payload:\n${r.result.slice(0, 800)}`);
   return payload;
+}
+
+// A cleared → fold the final A findings (even READY carries polish) + do the MINOR-bump phase
+// handoff: copy the living docs into a new vX_(Y+1)/ dir and generate the B/C/D prompts there.
+async function phaseHandoffA(findings: Findings, round: number): Promise<FoldPayload | undefined> {
+  const files = Object.entries(findings).map(([k, f]) => `${k}=${f.file} (${f.verdict})`).join(", ");
+  const prompt = [
+    `You are resuming as the Build-Guide Planning Orchestrator (your own thread). Cold-A (self-containment) returned READY TO BUILD, so the cold phase is CLEARING for ${implAbs}.`,
+    `Round ${round} A findings: ${files}.`,
+    `1) FIRST validate + fold the final A findings — even a READY pass carries polish / non-breaking-but-real findings; flag-don't-assert; surface any genuine DECISION instead of folding. Drive a PATCH bump and run the 2-subagent breadth pass.`,
+    `2) Then, since A is now closed, do the PHASE HANDOFF (DEV_RULES §Versioning "demarcate phases with a MINOR bump"): drive a MINOR bump and COPY the living docs (IMPLEMENT + both addenda) into a NEW sibling directory vX_(Y+1)/ (e.g. .../v3_6/ → .../v3_7/). Leave the standing GAP_REVIEW records in the old dir (they keep it populated). Generate the B/C/D REVIEW_PROMPTS in the NEW dir.`,
+    `Return the control payload: version = the new MINOR version; archiveDir = the NEW dir (ABSOLUTE path); reviewPromptsPath = the new B/C/D REVIEW_PROMPTS (ABSOLUTE); nextAngles = [{"key":"B","repo":true},{"key":"C","repo":true}] plus {"key":"D","repo":true} ONLY if the build carries substantial design/UX; decisionsNeeded = any surfaced; compactArg = your forward note.`,
+    `Return ONLY the structured control payload.`,
+  ].join("\n\n");
+  const p = await orchTurn(prompt, `A→B/C/D handoff (final fold + minor bump + new dir) — orchestrator`);
+  if (p) console.log(`  cold-A cleared → handoff ${p.version}${p.archiveDir ? ` in ${path.basename(path.resolve(p.archiveDir))}/` : ""}`);
+  return p;
+}
+
+// All angles cleared → Build Guide Final Cuts + final version bump. Assumes the final fold and a
+// self-compact already ran, so the orchestrator's context is clean before the final clean condense.
+async function finalCutsStep(currentImpl: string, finalBump: "major" | "minor" | undefined): Promise<FoldPayload | undefined> {
+  const bumpLine = finalBump === "major" ? "Drive a MAJOR bump (plan → execution / architectural change)."
+    : finalBump === "minor" ? "Drive a MINOR bump (recent-build delta / polish only)."
+    : "Drive the version bump per the GATE:FINAL_BUMP intent recorded at the top of the IMPLEMENT (MAJOR for an architectural/deployment change; MINOR for a recent-build delta).";
+  const prompt = [
+    `You are resuming as the Build-Guide Planning Orchestrator (your own thread). ALL angles (A + B/C/D) returned READY TO BUILD for ${currentImpl}. Do the BUILD GUIDE FINAL CUTS (DEV_RULES §End-game). You have ALREADY folded the final findings and compacted, so your context is clean — read the doc fresh from disk.`,
+    `1) Final clean condense: strip what is the WRONG context for the EXECUTION orchestrator — changelog, provenance, slipped-scope rationale, resolved-edges, owner-decision tags, gap-review framing, excessive prose — KEEPING the byte-exact anchors + ALL executable content. Move substantial rationale to a sibling vX_Y_Z_RATIONALE.md with a "don't read the rationale unless you must" note in the IMPLEMENT.`,
+    `2) Run the 2-subagent breadth pass on the cut doc — verify nothing executable was dropped.`,
+    `3) ${bumpLine}`,
+    `Return the control payload: version = the final version; archiveDir + reviewPromptsPath (ABSOLUTE); nextAngles = [] (gate clear); compactArg = your forward note.`,
+    `Return ONLY the structured control payload.`,
+  ].join("\n\n");
+  const p = await orchTurn(prompt, `Build Guide Final Cuts (${finalBump ?? "bump per doc"}) — orchestrator`);
+  if (p) console.log(`  final cuts → ${p.version}`);
+  return p;
+}
+
+// The intended FINAL version bump — knowable before the gate runs. Read from a
+// `<!-- GATE:FINAL_BUMP: major|minor … -->` marker near the top of the IMPLEMENT; `--final-bump`
+// overrides; absent → undefined (the orchestrator decides per the doc). See templates/GATE_NOTES.
+function finalBumpIntent(implPath: string): "major" | "minor" | undefined {
+  const cli = arg("--final-bump");
+  if (cli === "major" || cli === "minor") return cli;
+  if (!fs.existsSync(implPath)) return undefined;
+  const m = fs.readFileSync(implPath, "utf8").slice(0, 4000).match(/GATE:FINAL_BUMP:\s*(major|minor)/i);
+  return m ? (m[1].toLowerCase() as "major" | "minor") : undefined;
 }
 
 // ── The run ──────────────────────────────────────────────────────────────────
@@ -465,6 +552,7 @@ if (dryRun) {
   for (const k of ["A", "B", "C", "D"] as Angle[])
     console.log(`  reviewer ${k}       ${(ov.reviewerModel[k] ?? REVIEWER.model).padEnd(20)} ${ov.reviewerEffort ?? REVIEWER.effort}`);
   console.log(`  orchestrator     ${orchModel.padEnd(20)} ${orchEffort}`);
+  console.log(`final version bump: ${finalBumpIntent(coreDocs[0].path) ?? "(not set — orchestrator decides per doc; set via --final-bump or a GATE:FINAL_BUMP marker)"}`);
   console.log(`core docs (inlined every prompt):`);
   let total = 0;
   for (const d of coreDocs) { const kb = fs.statSync(d.path).size; total += kb; console.log(`  ${d.label.padEnd(16)} ${(kb / 1024).toFixed(0).padStart(4)} KB  ${path.relative(repoRoot, d.path)}`); }
@@ -523,77 +611,56 @@ for (let round = 1; round <= maxRounds; round++) {
   }));
   spin.end();
 
-  // 2) All active angles READY → this phase is clear.
-  if (Object.values(findings).every((f) => f.verdict === "READY")) {
-    console.log("\n✅ Every active angle returned READY TO BUILD.");
-    // PILOT-HARDEN: A-gate close → orchestrator preps B/C/D kickoff (new dir); and the final
-    // Build Guide Final Cuts after B/C/D close. For the first pilot these are driven by hand
-    // with the orchestrator; wiring them as explicit steps is the next hardening pass.
+  // 2) End-of-phase / convergence handling. A READY verdict still carries findings to fold —
+  //    "all READY" is never a bare stop; it triggers the phase-appropriate end-game.
+  if (!orchSession) die("findings need folding but no orchestrator session — re-run with --orchestrator-id <uuid>.");
+  const allReady = Object.values(findings).every((f) => f.verdict === "READY");
+  const anyNarrow = Object.values(findings).some((f) => f.verdict === "NARROW");
+  const phaseIsA = active.every((a) => a.key === "A");   // cold-A phase (A alone) vs a B/C/D phase
+
+  // 2a) COLD-A CLEARED → final fold + MINOR-bump handoff into a new dir → continue with B/C/D.
+  if (allReady && phaseIsA) {
+    console.log("\n✅ Cold-A cleared — final fold + handoff to B/C/D.");
+    let p = await phaseHandoffA(findings, round);
+    if (!p) die("phase handoff returned no structured payload.");
+    p = await resolveDecisions(p);
+    await compactForward(p.compactArg);
+    reviewPromptsPath = path.resolve(p.reviewPromptsPath);
+    archiveDir = p.archiveDir ? path.resolve(p.archiveDir) : path.dirname(reviewPromptsPath);
+    if (!fs.existsSync(reviewPromptsPath)) die(`handoff reported a REVIEW_PROMPTS that isn't on disk: ${reviewPromptsPath}`);
+    const handoffImpl = implFromPayload(p);
+    if (fs.existsSync(handoffImpl)) coreDocs = resolveCoreDocs(handoffImpl, repoRoot);
+    active = p.nextAngles?.length ? p.nextAngles : [{ key: "B", repo: true }, { key: "C", repo: true }];
+    console.log(`  → B/C/D open in ${path.basename(archiveDir)}/ with [${active.map((a) => a.key).join(", ")}]`);
+    continue;
+  }
+
+  // 2b) B/C/D CLEARED → final fold → compact (clean context) → Build Guide Final Cuts → done.
+  if (allReady) {
+    console.log("\n✅ B/C/D cleared — final fold, then Build Guide Final Cuts.");
+    const p = await foldTurn(findings, round);
+    await compactForward(p.compactArg);                    // compact BEFORE the clean condense (Sean's rule)
+    const finalBump = finalBumpIntent(implFromPayload(p));
+    const fc = await finalCutsStep(implFromPayload(p), finalBump);
+    const done = fc ?? p;
+    await compactForward(done.compactArg);
+    archiveDir = done.archiveDir ? path.resolve(done.archiveDir) : archiveDir;
+    console.log(`\n🏁 gate clear → ${done.version} (${finalBump ?? "bump per doc"}). The build guide is ready to execute.`);
     break;
   }
 
-  // 3) Fold. Resume Sean's orchestrator; it validates + folds + bumps + regenerates + self-compacts.
-  if (!orchSession) die("findings need folding but no orchestrator session — re-run with --orchestrator-id <uuid>.");
-  const anyNarrow = Object.values(findings).some((f) => f.verdict === "NARROW");
-  const foldPrompt = [
-    `You are resuming as the Build-Guide Planning Orchestrator (your own thread) for the gap-review gate on ${implAbs}.`,
-    `Round ${round} findings are written to disk: ${Object.entries(findings).map(([k, f]) => `${k}=${f.file} (${f.verdict})`).join(", ")}.`,
-    `Per DEV_RULES §The Gap-Review Gate: VALIDATE each finding against reality (flag-don't-assert — verify before folding; do NOT fold a finding that is a DECISION — a north-star / architecture / genuinely-unclear call — surface it instead).`,
-    `Fold the real ones into the IMPLEMENT + addenda, bump the version (PATCH), update the "Settled — do not re-raise" ledger (replace superseded entries, never append a contradiction), run the 2-subagent breadth pass, and regenerate the REVIEW_PROMPTS (scoped + narrowed re-prompt for any passed angle whose lane a fold touched; omit angles that stay closed).`,
-    `Then WRITE your own forward /compact instruction (what the NEXT round must keep) and return it as compactArg.`,
-    `Return ONLY the structured control payload.`,
-  ].join("\n\n");
-
-  const foldSpin = new Spinner();
-  foldSpin.begin(`folding round ${round} — orchestrator (${orchModel} ${orchEffort})`);
-  let fold = await runQuery({
-    prompt: foldPrompt,
-    model: orchModel,
-    effort: orchEffort,
-    cwd: repoRoot,
-    resume: orchSession,
-    permissionMode: HEADLESS,
-    settingSources: ["user", "project", "local"],   // its project context: CLAUDE.md/AGENTS.md/DEV_RULES/memory
-    jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
-  });
-  foldSpin.end();
-  haltIfLimited(fold);
-  let payload = fold.structuredOutput as FoldPayload | undefined;
-  if (!payload) die(`orchestrator returned no structured payload:\n${fold.result.slice(0, 1200)}`);
-  console.log(`  folded ${payload.foldedCount ?? "?"} → ${payload.version}${payload.gateStatus ? `  (${payload.gateStatus})` : ""}`);
-
-  // 4) Human decision-pause — the loop CANNOT fold a judgment call without Sean.
-  if (payload.decisionsNeeded?.length) {
-    console.log(`\n⏸  ${payload.decisionsNeeded.length} decision(s) need you:`);
-    const answers: string[] = [];
-    for (const d of payload.decisionsNeeded) answers.push(`Q: ${d}\nA: ${await ask(`\n${d}\n> `)}`);
-    fold = await runQuery({
-      prompt: `The human answered:\n\n${answers.join("\n\n")}\n\nFold accordingly, regenerate the REVIEW_PROMPTS, and return the same structured payload shape.`,
-      model: orchModel, effort: orchEffort, cwd: repoRoot, resume: orchSession,
-      permissionMode: HEADLESS, settingSources: ["user", "project", "local"],
-      jsonSchema: FOLD_SCHEMA as unknown as Record<string, unknown>,
-    });
-    haltIfLimited(fold);
-    payload = (fold.structuredOutput as FoldPayload | undefined) ?? payload;
-  }
-
-  // 4.5) CONSOLIDATE (distinct step). A NARROW verdict means the loop is converging → run the
-  //      clean-up-read turn on the just-folded doc (its own patch + its own breadth pass), so the
-  //      presumed-final cold-A pass reviews the cleaned version. This is step 3 of the 4-step
-  //      NARROW protocol (fold → consolidate → final A), wired so it never needs a human's eyes.
-  if (anyNarrow) {
+  // 3) Still converging: fold → consolidate (if NARROW) → compact → follow to the next round.
+  let payload = await foldTurn(findings, round);
+  if (anyNarrow) {                                          // NARROW = last stretch → clean-up read (step 3 of 4)
     const cons = await consolidateStep(implFromPayload(payload));
     if (cons) payload = cons;
   }
-
-  // 5) File-drop compaction — drive the orchestrator's self-authored /compact on its own session.
   await compactForward(payload.compactArg);
 
-  // 6) Follow the orchestrator to the next round's docs + angles.
   reviewPromptsPath = path.resolve(payload.reviewPromptsPath);
   archiveDir = payload.archiveDir ? path.resolve(payload.archiveDir) : path.dirname(reviewPromptsPath);
   if (!fs.existsSync(reviewPromptsPath)) die(`orchestrator reported a REVIEW_PROMPTS that isn't on disk: ${reviewPromptsPath}`);
-  const nextImpl = path.join(archiveDir, path.basename(reviewPromptsPath).replace(/_REVIEW_PROMPTS\.md$/i, "_IMPLEMENT.md"));
+  const nextImpl = implFromPayload(payload);
   if (fs.existsSync(nextImpl)) coreDocs = resolveCoreDocs(nextImpl, repoRoot); // re-inline the bumped docs
 
   if (!payload.nextAngles?.length) { console.log("\n✅ No angles left to re-run — gate clear."); break; }
@@ -601,4 +668,4 @@ for (let round = 1; round <= maxRounds; round++) {
 }
 
 console.log(`\nDone. GAP_REVIEW + REVIEW_PROMPTS files are in ${archiveDir}`);
-console.log("(NARROW→consolidate is wired; the phase A→B/C/D directory handoff and final Build Guide Cuts are the remaining end-game steps — see NEXT_UPDATE.md.)");
+console.log("(Full end-game wired: NARROW→consolidate, cold-A→B/C/D minor handoff, and B/C/D→Final Cuts + version bump.)");
