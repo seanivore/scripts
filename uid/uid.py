@@ -20,7 +20,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from idgen import VERSION, IdGenerationError, emit, legacy_ids  # noqa: E402
+from idgen import IdGenerationError, emit, legacy_ids  # noqa: E402
+
+# Each command owns its version so bumping the shared core does not silently
+# bump both CLIs.
+VERSION = "1.0.0"
 
 
 def main() -> int:

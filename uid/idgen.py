@@ -164,6 +164,51 @@ def modern_ids(
     return _generate(lambda: _modern_candidate(prefix, length), count, taken)
 
 
+def modern_families(
+    count: int = 1,
+    prefixes: Optional[list[str]] = None,
+    length: int = DEFAULT_MODERN_LENGTH,
+    check_dir: Optional[str] = None,
+) -> list[list[str]]:
+    """
+    Generate `count` ID *families* — several prefixes sharing one random stem:
+
+        job_7k2mfq4x9btz3n
+        cus_7k2mfq4x9btz3n
+        cou_7k2mfq4x9btz3n
+
+    The shared stem is the point, not a leak. One job produces several documents
+    (record, customer, coupon, receipt), and a client holding three of them can
+    see at a glance that they belong together. Giving related documents
+    unrelated IDs makes the set unnavigable.
+
+    A stem is only accepted when *every* member of the family is free, so the
+    directory check covers the whole group rather than just the first ID.
+    """
+    if not prefixes:
+        raise IdGenerationError("A family needs at least one prefix.")
+    if length < 1:
+        raise IdGenerationError("Length must be at least 1.")
+
+    seen: Set[str] = existing_ids(check_dir) if check_dir else set()
+    families: list[list[str]] = []
+
+    for _ in range(count):
+        for _attempt in range(MAX_ATTEMPTS):
+            body = "".join(secrets.choice(CROCKFORD32) for _ in range(length))
+            group = [f"{prefix}_{body}" for prefix in prefixes]
+            if not any(member in seen for member in group):
+                seen.update(group)
+                families.append(group)
+                break
+        else:
+            raise IdGenerationError(
+                f"Could not find a free stem after {MAX_ATTEMPTS} attempts. "
+                f"Try a longer --len."
+            )
+    return families
+
+
 def uuid7_ids(count: int = 1) -> list[str]:
     """
     Generate `count` UUIDv7s — time-ordered, so they sort chronologically and

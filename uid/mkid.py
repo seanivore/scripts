@@ -11,6 +11,11 @@ reads like a native terminal command.
     mkid --uuid7                01936f8a-7c41-7f3e-b8d1-4a9c2e5f0b73
     mkid --in data/records/
 
+    mkid --prefix job --family cus,cou      one stem, several prefixes:
+                                              job_7k2mfq4x9btz3n
+                                              cus_7k2mfq4x9btz3n
+                                              cou_7k2mfq4x9btz3n
+
 Alphabet is Crockford base32 (no i/l/o/u) so IDs survive being read aloud,
 handwritten, or retyped without ambiguity.
 """
@@ -26,12 +31,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from idgen import (  # noqa: E402
     DEFAULT_MODERN_LENGTH,
     DEFAULT_MODERN_PREFIX,
-    VERSION,
     IdGenerationError,
     emit,
+    modern_families,
     modern_ids,
     uuid7_ids,
 )
+
+VERSION = "1.1.0"
 
 
 def main() -> int:
@@ -60,9 +67,16 @@ def main() -> int:
         help=f"Random body length (default: {DEFAULT_MODERN_LENGTH}).",
     )
     parser.add_argument(
+        "-f", "--family", metavar="P1,P2",
+        help="Comma-separated sibling prefixes sharing one stem, e.g. "
+             "`--prefix job --family cus,cou`. Use when several documents belong "
+             "to the same record and should be recognisable as a set.",
+    )
+    parser.add_argument(
         "--uuid7", action="store_true",
         help="Emit UUIDv7 instead — time-ordered and sortable, for database "
-             "primary keys. Ignores --prefix and --len.",
+             "primary keys. Ignores --prefix and --len. Note it leaks creation "
+             "order, so avoid it where sequence should stay private.",
     )
     parser.add_argument(
         "--in", dest="check_dir", metavar="DIR",
@@ -75,8 +89,32 @@ def main() -> int:
     if args.count < 1:
         parser.error("--count must be at least 1")
 
+    if args.family and args.uuid7:
+        parser.error("--family and --uuid7 are incompatible (UUIDv7 has no prefix)")
+    if args.family and not args.prefix:
+        parser.error("--family needs a non-empty --prefix to lead the group")
+
     try:
-        if args.uuid7:
+        if args.family:
+            # Primary prefix first, then siblings in the order given; duplicates
+            # dropped so `--prefix job --family job,cus` still behaves.
+            prefixes: list[str] = [args.prefix]
+            for candidate in args.family.split(","):
+                candidate = candidate.strip()
+                if candidate and candidate not in prefixes:
+                    prefixes.append(candidate)
+
+            families = modern_families(
+                count=args.count,
+                prefixes=prefixes,
+                length=args.length,
+                check_dir=args.check_dir,
+            )
+            for index, group in enumerate(families):
+                if index:
+                    print()          # blank line separates groups
+                emit(group)
+        elif args.uuid7:
             emit(uuid7_ids(count=args.count))
         else:
             emit(

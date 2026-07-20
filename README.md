@@ -53,7 +53,19 @@ mkid --uuid7              # 01936f8a-7c41-7f3e-b8d1-4a9c2e5f0b73
 mkid --in data/records/   # never reissue an ID already in that directory
 ```
 
-Crockford base32 — no `i`, `l`, `o`, `u` — so IDs survive being read aloud, handwritten, or retyped. Default body length 14 gives about 4.4 × 10²¹ combinations. `--uuid7` emits time-ordered UUIDs that sort chronologically, which is what you want for database primary keys.
+Crockford base32 — no `i`, `l`, `o`, `u` — so IDs survive being read aloud, handwritten, or retyped. Default body length 14 gives about 4.4 × 10²¹ combinations. `--uuid7` emits time-ordered UUIDs that sort chronologically, which is what you want for database primary keys — but note it leaks creation order, so avoid it where the sequence should stay private.
+
+**Families — one stem, several prefixes:**
+
+```bash
+mkid --prefix job --family cus,cou,pay
+job_7k2mfq4x9btz3n
+cus_7k2mfq4x9btz3n
+cou_7k2mfq4x9btz3n
+pay_7k2mfq4x9btz3n
+```
+
+Use this when one record produces several documents. The shared stem is the feature: someone holding the invoice, the coupon, and the receipt can see instantly that they belong together, where three unrelated IDs would make the set unnavigable. A stem is only issued when **every** member of the family is free, so `--in` checks the whole group rather than just the first. Pass `-n` for several families, separated by blank lines.
 
 **For user IDs, `mkid --prefix usr` is the standard.** Generate once and store it alongside the user record. Do not derive a user ID from a username — a derived ID is reversible by brute force over a small name space, and any short derived format collides badly.
 
