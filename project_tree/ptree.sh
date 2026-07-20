@@ -1,83 +1,106 @@
-#!/bin/bash
-# Enhanced project tree with hidden file control
-# Usage: ptree [options]
+#!/usr/bin/env bash
+# ptree — project tree viewer with hidden-file control
+# Usage: ptree [-a|-s] [-L depth] [directory]
+#
+# Wrapper around `tree` with three visibility modes. The previous -s mode piped
+# tree through two greps with a `||` fallback that fired unpredictably, so the
+# output differed run to run and was effectively unmaintainable. Each mode is
+# now a single tree invocation with an explicit ignore pattern — what you see is
+# what the pattern says.
+set -uo pipefail
+
+VERSION="2.0.0"
+
+# Always excluded — heavy build/dependency output, never interesting in a tree.
+ALWAYS_IGNORE="node_modules|target|venv|.venv|.git"
+
+# Additionally excluded in -s (select) mode: hidden dirs that are machine noise
+# rather than project context.
+NOISE_IGNORE=".DS_Store|.cache|.npm|.yarn|.pytest_cache|__pycache__|.mypy_cache|.next|.turbo|.ruff_cache"
 
 show_help() {
-    echo "ptree - Enhanced project tree viewer"
-    echo ""
-    echo "Usage:"
-    echo "  ptree           Show normal tree (default behavior)"
-    echo "  ptree -a        Show ALL hidden files and directories"
-    echo "  ptree -s        Show SELECT hidden files (.claude, .cursor, .notes, etc.)"
-    echo "  ptree -h        Show this help"
-    echo ""
-    echo "Examples:"
-    echo "  ptree           # Normal tree, no hidden files"
-    echo "  ptree -a        # Include all hidden files"
-    echo "  ptree -s        # Show only important hidden files"
+    cat <<'EOF'
+ptree - Project tree viewer with hidden-file control
+
+Usage:
+  ptree                   Normal tree — no hidden files
+  ptree -a                ALL hidden files and directories
+  ptree -s                SELECT hidden — hidden files minus machine noise
+                          (keeps .claude, .agents, .cursor, .env; drops
+                          .DS_Store, .cache, __pycache__, .next, ...)
+  ptree -L <n>            Limit depth to n levels
+  ptree [directory]       Target a directory (default: current)
+  ptree -h                Show this help
+  ptree --version         Show version
+
+Examples:
+  ptree                   # Normal tree of the current directory
+  ptree -s                # Include the hidden dirs that carry project context
+  ptree -a -L 2 ~/proj    # All hidden, two levels deep, specific directory
+EOF
 }
 
-show_normal_tree() {
-    echo "Project Structure (excluding hidden files):"
-    echo "=========================================="
-    tree -C -I "node_modules|target|venv|.git|.*" --prune
-}
+MODE="normal"
+DEPTH=""
+TARGET="."
 
-show_selective_hidden() {
-    echo "Project Structure (with select hidden files):"
-    echo "============================================="
-    
-    # Show normal tree but include specific hidden directories
-    tree -C -I "node_modules|target|venv|.git" --prune -a | grep -v -E '^\.\.$|^\.$' | \
-    grep -E -v '^\.[^/]*$' || tree -C -I "node_modules|target|venv|.git|.DS_Store|.cache|.npm|.yarn" --prune
-    
-    echo ""
-    echo "Important Hidden Items:"
-    echo "======================"
-    
-    # Show specific hidden directories with their contents
-    for dir in .claude .cursor .notes .drafts .planning .idea .vscode .ai.dev-resources; do
-        if [ -d "$dir" ]; then
-            echo ""
-            echo "📁 $dir/"
-            tree -C -L 2 "$dir" 2>/dev/null || ls -la "$dir" | tail -n +2 | head -10
-        fi
-    done
-    
-    # Show specific hidden files
-    echo ""
-    echo "Hidden Files:"
-    echo "============"
-    for file in .gitignore .env .env.example .aider.conf.yml .cursorrules .claude_context; do
-        if [ -f "$file" ]; then
-            echo "📄 $file"
-        fi
-    done
-}
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help|help) show_help; exit 0 ;;
+        --version)      echo "ptree $VERSION"; exit 0 ;;
+        -a|--all)       MODE="all"; shift ;;
+        -s|--select)    MODE="select"; shift ;;
+        -L|--level)
+            DEPTH="${2:-}"
+            if ! [[ "$DEPTH" =~ ^[0-9]+$ ]]; then
+                echo "ptree: -L requires a number" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Use 'ptree -h' for help" >&2
+            exit 1
+            ;;
+        *)              TARGET="$1"; shift ;;
+    esac
+done
 
-show_all_hidden() {
-    echo "Project Structure (including ALL hidden files):"
-    echo "==============================================="
-    tree -C -I "node_modules|target|venv" --prune -a
-}
+# Dependency guard. Without this the script failed with a raw "command not
+# found" from inside a function, which reads as a bug in ptree rather than a
+# missing package.
+if ! command -v tree >/dev/null 2>&1; then
+    echo "ptree: requires the 'tree' command, which is not installed." >&2
+    echo "ptree: install it with:  brew install tree" >&2
+    exit 1
+fi
 
-# Parse command line arguments
-case "${1:-}" in
-    -h|--help|help)
-        show_help
+if [ ! -d "$TARGET" ]; then
+    echo "ptree: '$TARGET' is not a directory" >&2
+    exit 1
+fi
+
+# macOS still ships bash 3.2, where expanding an empty array under `set -u` is
+# an "unbound variable" error. The ${arr[@]+...} guard makes an empty depth
+# argument list expand to nothing instead of exploding.
+depth_args=()
+[ -n "$DEPTH" ] && depth_args=(-L "$DEPTH")
+
+case "$MODE" in
+    normal)
+        echo "Project Structure (excluding hidden files):"
+        echo "=========================================="
+        tree -C --prune -I "$ALWAYS_IGNORE|.*" ${depth_args[@]+"${depth_args[@]}"} "$TARGET"
         ;;
-    -a|--all)
-        show_all_hidden
+    all)
+        echo "Project Structure (including ALL hidden files):"
+        echo "==============================================="
+        tree -C --prune -a -I "$ALWAYS_IGNORE" ${depth_args[@]+"${depth_args[@]}"} "$TARGET"
         ;;
-    -s|--select)
-        show_selective_hidden
+    select)
+        echo "Project Structure (with select hidden files):"
+        echo "============================================="
+        tree -C --prune -a -I "$ALWAYS_IGNORE|$NOISE_IGNORE" ${depth_args[@]+"${depth_args[@]}"} "$TARGET"
         ;;
-    "")
-        show_normal_tree
-        ;;
-    *)
-        echo "Unknown option: $1"
-        echo "Use 'ptree -h' for help"
-        exit 1
-        ;;
-esac 
+esac
