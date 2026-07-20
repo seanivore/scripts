@@ -1,163 +1,146 @@
-# Development Scripts Collection
+# scripts
 
-This directory contains various development tools and utilities organized by category.
+Shared terminal commands. **This repo is the single source of truth** — every command lives here and installs to `~/bin`. Nothing here should ever be copied into a project repo.
 
-## Directory Structure
+## The commands
 
-```
-~/Development/scripts/
-├── cache_cleaner/           # Python cache and temp file cleaner
-│   ├── clearpy.sh          # Main clearpy script
-│   └── install_clearpy_command.sh
-├── project_tree/           # Enhanced project structure viewer
-│   ├── ptree.sh           # Main ptree script
-│   └── install_ptree_command.sh
-├── filemgmt/               # Bulk Directory File Management
-│   ├── filemgmt.sh        # Main filemgmt script
-│   └── install_filemgmt.sh
-├── gate/                   # Gap-review courier engine (TypeScript; Agent SDK peers)
-│   ├── src/gate.ts        # The courier loop
-│   ├── src/sdk.ts         # Agent SDK peer wrapper (strips key → Max subscription)
-│   ├── src/probe.ts       # Verification gates (auth / compact / isolate / find)
-│   ├── config.ts          # Angle + per-node model/effort
-│   ├── templates/         # review-prompt.md + GATE_NOTES.example.md (the method as data)
-│   └── README.md
-└── README.md              # This file
-```
+| Command | What it does | Example |
+| --- | --- | --- |
+| `uid` | Legacy unique ID, `uid-abc-123` | `uid --in assets/docs/` |
+| `mkid` | Modern unique ID — **use this for new projects** | `mkid --prefix usr` |
+| `token` | Estimate token count of text, a file, or a repo | `token .` |
+| `clearpy` | Delete caches and temp files (`__pycache__`, `.DS_Store`, …) | `clearpy -n` |
+| `ptree` | Project tree with hidden-file control | `ptree -s` |
+| `filemgmt` | Propagate one canonical doc across every project | `filemgmt -f ~/Development -r <path>/.agents/DEV_RULES.md` |
+| `gate` | Gap-review courier engine (Claude Agent SDK) | `gate <IMPLEMENT-path> --dry-run` |
 
-## Installation
+Every command supports `--help` and `--version`.
 
-Each tool has its own installer script that copies the command to `~/bin/` for global access.
+## Install
 
-### Prerequisites
-
-1. Ensure `~/bin` exists and is in your PATH:
-   ```bash
-   mkdir -p ~/bin
-   echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc  # or ~/.bashrc
-   source ~/.zshrc
-   ```
-
-### Available Tools
-
-#### clearpy - Cache Cleaner
-Removes Python cache files, .DS_Store files, and other development temp files.
-
-**Installation:**
 ```bash
-cd ~/Development/scripts/cache_cleaner
-./install_clearpy_command.sh
+git clone git@github.com:seanivore/scripts.git ~/Development/scripts
+cd ~/Development/scripts
+./install_all.sh
 ```
 
-**Usage:**
+That installs all seven commands into `~/bin`. This is the fresh-machine path — one clone, one command.
+
+`~/bin` must be on your PATH. In `~/.zshrc`:
+
 ```bash
-clearpy                 # Clean current directory
-clearpy ~/my-project    # Clean specific directory  
-clearpy -v              # Verbose mode
-clearpy -n              # Dry run (preview)
-clearpy -h              # Help
+export PATH="$PATH:$HOME/bin"
 ```
 
-**Removes:**
-- `__pycache__` directories and `.pyc` files
-- `.DS_Store` files (macOS Finder metadata)
-- `.pytest_cache`, `.mypy_cache`, `.tox` directories
-- `.coverage` files and `.cache` directories
-- Temporary editor files (`.swp`, `.tmp`, `~backup` files)
+To reinstall a single command, run its own installer (`uid/install_uid_commands.sh`, `token/install_token_command.sh`, and so on).
 
-#### ptree - Enhanced Project Tree
-Enhanced project structure viewer with hidden file control.
+**Prerequisites:** `python3` for `uid`/`mkid`/`token`, `tree` for `ptree` (`brew install tree`), Node + `npm install` inside `gate/` for `gate`.
 
-**Installation:**
+---
+
+## ID generation — which one to use
+
+Two generators, one shared core (`uid/idgen.py`). Both draw from `secrets`, never the clock.
+
+### `mkid` — the default for anything new
+
 ```bash
-cd ~/Development/scripts/project_tree
-./install_ptree_command.sh
+mkid                      # id_7k2mfq4x9btz3n
+mkid --prefix usr         # usr_3nq8wt2fkx7mbz
+mkid --prefix usr -n 3    # three at once
+mkid --uuid7              # 01936f8a-7c41-7f3e-b8d1-4a9c2e5f0b73
+mkid --in data/records/   # never reissue an ID already in that directory
 ```
 
-**Usage:**
+Crockford base32 — no `i`, `l`, `o`, `u` — so IDs survive being read aloud, handwritten, or retyped. Default body length 14 gives about 4.4 × 10²¹ combinations. `--uuid7` emits time-ordered UUIDs that sort chronologically, which is what you want for database primary keys.
+
+**For user IDs, `mkid --prefix usr` is the standard.** Generate once and store it alongside the user record. Do not derive a user ID from a username — a derived ID is reversible by brute force over a small name space, and any short derived format collides badly.
+
+### `uid` — legacy format, existing repos only
+
 ```bash
-ptree           # Normal tree (no hidden files)
-ptree -a        # Show ALL hidden files
-ptree -s        # Show SELECT hidden files (.claude, .cursor, etc.)
-ptree -h        # Help
+uid                       # uid-abc-123
+uid -n 5
+uid --in assets/docs/     # checked against existing filenames
 ```
 
-**Features:**
-- Smart hidden file filtering
-- Shows important config files (`.gitignore`, `.env`, etc.)
-- Highlights development directories (`.claude`, `.cursor`, etc.)
-- Excludes noise (`node_modules`, `.git`, cache dirs)
+Exists because `360-design` and `freelance-payments` already have `uid-abc-123` baked into filenames, templates, and their prefix-swap conventions (`uid-` → `cou-` / `cus-`, and `uid-col-###` for collections). The namespace is only 26³ × 1000 ≈ 17.5M, so **pass `--in` whenever the ID becomes a filename** — that turns "probably unique" into "unique, full stop."
 
-#### filemgmt - Bulk Directory File Management
-Find and replace, or add, canonical resource documents across project directories. Extremely useful for keeping `.agent/DEV_RULES.md`, `BRAND.md`, or any other shared resource doc in sync from a single source.
+`col`, `cou`, and `cus` are never emitted as the middle segment, since those are claimed by the consumer repos.
 
-**Installation:**
+### Why this was rewritten
+
+The predecessor lived in the retired `modular-agent-orchestrator` repo, reached through a hardcoded `sys.path.append` in `~/bin/uid`. It worked only because that repo happened to still be on disk.
+
+It also claimed "Guaranteed unique (timestamp-based)" and was not. Measured: **2000 rapid calls produced 3 unique IDs** — a 99.85% collision rate. Every part of the ID came from the clock, and the same-second collision counter was dead code, because each CLI invocation built a fresh generator that reset the counter to zero. The current version returns 2000 unique IDs from the same test.
+
+---
+
+## `token`
+
 ```bash
-cd ~/Development/scripts/frdoc
-./install_filemgmt.sh
+token README.md              # 1.7k tokens  ~  README.md
+token .                      # whole directory, with the largest files listed
+token "some text"
+token . --json --top 20
 ```
 
-**Usage:**
+Counts are **approximate** — a character-ratio estimate, roughly ±10%. There is no offline tokenizer for Claude, and the point of this command is an instant answer to "will this fit." Directory mode skips `.git`, `node_modules`, `venv`, and build output.
+
+## `clearpy`
+
 ```bash
-# Add a new file to all .agent directories:
-filemgmt -f ~/Development/*/.agent -a ~/Development/thot/.agent/RESEARCH_PROTOCOL.md
-
-# Replace DEV_RULES.md everywhere it's found inside ~/Development:
-filemgmt -f ~/Development -r ~/Development/thot/.agent/DEV_RULES.md
-
-filemgmt -d ...                # Dry run (preview matches, no writes)
-filemgmt -y ...                # Skip confirmation prompt
-filemgmt -h                    # Help
+clearpy                  # clean the current directory
+clearpy ~/my-project
+clearpy -n               # dry run — preview, delete nothing
+clearpy -v               # list every item as it goes
 ```
 
-**Behavior:**
-- Collects multiple directories if bash globbing is used (e.g. `*` or `**`).
-- With `-r` (replace): Searches target directories and overwrites existing files. If the target directory name matches the canonical file's parent folder (e.g., `.agent`), it will implicitly add the file if it's missing!
-- With `-a` (add): Adds the canonical file into every target directory specified.
-- Checks paths for typos (like `~User/...`) and provides help.
-- Relies on git for safety — no internal backups.
+Removes `__pycache__`, `.pyc`/`.pyo`, `.DS_Store`, `.pytest_cache`, `.mypy_cache`, `.tox`, `.coverage`, `.cache`, and editor temp files. Scans once and reports from that scan — an earlier version re-scanned after deleting and so always reported "already clean" no matter how much it removed.
 
-#### gate - Gap-Review Courier Engine
-Automates the DEV_RULES *Gap-Review Gate* loop: spawns genuinely-separate **peer** Claude reviewers (Agent SDK `query()` processes — A cold/no-repo, B/C/D repo — never subagents) on the **Max subscription**, couriers prompts + findings to/from the resumed Build-Guide orchestrator thread, and loops until every angle verdicts READY — pausing only when a finding needs a human decision. The method lives as editable data (`templates/` + `config.ts`); the script is plumbing. See `gate/README.md`.
+## `ptree`
 
-**Install:** the launcher is `~/bin/gate` (a bash shim that runs the TS engine via the local `tsx`). Requires `node` 22+; the Agent SDK + `tsx` are installed in `gate/`. Auth is the `claude.ai` Max login (no API key).
-
-**Usage:**
 ```bash
-gate ~/Development/<repo>/assets/docs/archive/vX_Y/vX_Y_Z_IMPLEMENT.md   # the full show (A looped → B/C/D)
-gate <IMPLEMENT-path> --dry-run                         # resolve + parse + report, no spend
-gate <IMPLEMENT-path> --phase-a                         # one band only (A); --phase-bcd for B/C/D
-gate <IMPLEMENT-path> --opus-4-7-reviewers              # down-shift models to relieve the usage meter
-gate --help                                             # all flags (model/effort overrides, phases, …)
+ptree            # no hidden files
+ptree -a         # all hidden files
+ptree -s         # hidden files minus machine noise
+ptree -a -L 2 ~/proj
 ```
 
-**Usage-meter knobs:** per-run model/effort overrides (`--opus-4-7-reviewers`, `--opus-4-7-reviewer-b-d-c`, `--opus-4-7-orchestrator --max`, `--xhigh`, …) opt a run down without touching the engine; defaults stay latest Opus. See `gate/README.md`.
+`-s` is the useful one: keeps context directories like `.claude`, `.agents`, `.cursor`, and `.env`, while dropping `.DS_Store`, `.cache`, `__pycache__`, `.next`, and friends. Requires `tree` (`brew install tree`).
 
-**Status:** first cut, foundation **proven** — subscription auth (`claude.ai / max`), `/compact` drivable via the SDK, Angle-A filesystem wall, and orchestrator resume-by-title all verified; `--dry-run` validated on real docs. Supervised live pilot next.
+## `filemgmt`
 
-## Adding New Tools
+Propagates one canonical file across every project directory.
 
-When creating new development tools:
+```bash
+filemgmt -f ~/Development -r ~/Development/_planner/.agents/DEV_RULES.md   # replace everywhere
+filemgmt -f ~/Development -a <path>/NEW_SHARED_DOC.md                     # add a new shared file
+filemgmt -f ~/Development -r <path>/BRAND.md -d                           # dry run
+```
 
-1. Create a new subdirectory: `~/Development/scripts/tool_name/`
-2. Include the main script and an installer: `tool_name.sh` and `install_tool_name_command.sh`
-3. Follow the pattern:
-   ```bash
-   # In installer script:
-   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-   cp "${SCRIPT_DIR}/tool_name.sh" "${HOME}/bin/tool_name"
-   ```
-4. Update this README with documentation
-5. Make sure the installer copies to `~/bin/` for global access
+`-r` overwrites every same-named file it finds; it also adds the file where the target directory matches the canonical's parent (which is how new projects pick up `.agents/` docs). Prunes `.git`, `node_modules`, `dist`, `build`, `.next`, `.venv`. No backups — it relies on git for safety.
 
-## Benefits of Centralized Scripts
+## `gate`
 
-- **Reusable**: Available across all projects
-- **Organized**: Categorized by function
-- **Maintainable**: Easy to update and version
-- **Portable**: Can be synced across machines
-- **Discoverable**: All tools documented in one place
+The gap-review courier engine — spawns peer Claude reviewers via the Agent SDK to run the DEV_RULES gap-review loop. Substantial enough to have its own docs: see [`gate/README.md`](gate/README.md) and [`gate/NEXT_UPDATE.md`](gate/NEXT_UPDATE.md) for status.
 
-## Integration with Projects
+```bash
+gate <IMPLEMENT-path> --dry-run    # resolve, parse, report — spawns nothing, no spend
+```
 
-Individual projects (like MAO) can reference these scripts but the canonical versions live here. Projects should include a `DEVELOPMENT_TOOLS.md` pointing to this centralized location rather than duplicating the tools. 
+Requires `npm install` inside `gate/`.
+
+---
+
+## Adding a new command
+
+Read **[`SCRIPT_STANDARD.md`](SCRIPT_STANDARD.md)** first. It is the build standard every command here follows, and it exists so each one behaves like a native terminal command rather than however a given session felt like building it.
+
+## Why everything lives here
+
+`~/bin` is a single flat namespace, so a command is inherently global — there is no coherent way for `project` to mean one thing in one repo and something else in another. What *is* per-project is the **data** a command operates on, and that belongs in a config file inside the project repo.
+
+`gate` already works this way: a global command here, reading `<repo>/.agents/GATE_NOTES.md` for per-project configuration. New commands should follow it.
+
+The alternative was tried and failed. `uid` began life inside one project, got copied into others, and ended up with four byte-identical copies scattered across repos — none of which actually worked, while the real implementation sat in a retired repo that nothing tracked.
