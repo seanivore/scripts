@@ -8,6 +8,7 @@ Shared terminal commands. **This repo is the single source of truth** — every 
 | --- | --- | --- |
 | `uid` | Legacy unique ID, `uid-abc-123` | `uid --in assets/docs/` |
 | `mkid` | Modern unique ID — **use this for new projects** | `mkid --prefix usr` |
+| `entry` | New record from a project's template, with a fresh ID | `entry --type collection` |
 | `token` | Estimate token count of text, a file, or a repo | `token .` |
 | `clearpy` | Delete caches and temp files (`__pycache__`, `.DS_Store`, …) | `clearpy -n` |
 | `ptree` | Project tree with hidden-file control | `ptree -s` |
@@ -24,7 +25,7 @@ cd ~/Development/scripts
 ./install_all.sh
 ```
 
-That installs all seven commands into `~/bin`. This is the fresh-machine path — one clone, one command.
+That installs all eight commands into `~/bin`. This is the fresh-machine path — one clone, one command.
 
 `~/bin` must be on your PATH. In `~/.zshrc`:
 
@@ -75,6 +76,40 @@ The predecessor lived in the retired `modular-agent-orchestrator` repo, reached 
 It also claimed "Guaranteed unique (timestamp-based)" and was not. Measured: **2000 rapid calls produced 3 unique IDs** — a 99.85% collision rate. Every part of the ID came from the clock, and the same-second collision counter was dead code, because each CLI invocation built a fresh generator that reset the counter to zero. The current version returns 2000 unique IDs from the same test.
 
 ---
+
+## `entry`
+
+Creates a new record from a project's template, with a fresh unique ID. One global command; each repo describes its own behaviour in `<repo>/.agents/entry.json`.
+
+```bash
+entry                     # default type
+entry --type collection
+entry -n 3                # three at once
+entry --dry-run           # show what would be created, write nothing
+```
+
+Run it from anywhere inside the repo — it finds the root by walking up to `.git`. IDs are always checked against the output directory, so a record can never overwrite an existing one.
+
+Config (start from [`entry/entry.example.json`](entry/entry.example.json)):
+
+```json
+{
+  "template_dir": "assets/docs",
+  "output_dir":   "assets/docs",
+  "id_format":    "legacy",
+  "indent":       4,
+  "default_type": "entry",
+  "types": {
+    "entry":      { "template": "_entry_template.json" },
+    "collection": { "template": "_collection_template.json", "middle": "col" }
+  },
+  "stamp": { "id": "{id}" }
+}
+```
+
+`stamp` maps dotted JSON paths to values; integers index lists (`price1.product.products.0`). `{id}` is the generated ID, and `{id:cus-}` swaps the leading prefix to derive a sibling ID.
+
+This replaced `new_job.py` and `new_project.py`, which were ~90% identical and reached through `~/bin` symlinks pointing into their own repos.
 
 ## `token`
 

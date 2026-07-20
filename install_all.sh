@@ -13,6 +13,7 @@ BIN_DIR="$HOME/bin"
 
 INSTALLERS=(
     "uid/install_uid_commands.sh"          # uid + mkid
+    "entry/install_entry_command.sh"       # entry
     "token/install_token_command.sh"       # token
     "cache_cleaner/install_clearpy_command.sh"
     "project_tree/install_ptree_command.sh"
@@ -50,7 +51,7 @@ fi
 
 echo
 echo "Commands now available:"
-for cmd in uid mkid token clearpy ptree filemgmt gate; do
+for cmd in uid mkid entry token clearpy ptree filemgmt gate; do
     if [ -x "$BIN_DIR/$cmd" ]; then
         echo "  ✓ $cmd"
     else

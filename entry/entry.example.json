@@ -1,0 +1,30 @@
+{
+  "_comment": "Copy to <repo>/.agents/entry.json and edit. Paths are relative to the repo root.",
+
+  "template_dir": "assets/docs",
+  "output_dir": "assets/docs",
+
+  "id_format": "legacy",
+  "_id_format_note": "'legacy' gives uid-abc-123 (existing repos only). 'modern' gives prefixed Crockford base32 — use this for new projects.",
+  "id_prefix": "id",
+  "id_length": 14,
+
+  "indent": 4,
+  "default_type": "entry",
+
+  "types": {
+    "entry": {
+      "template": "_entry_template.json"
+    },
+    "collection": {
+      "template": "_collection_template.json",
+      "middle": "col",
+      "_middle_note": "Legacy only — rewrites uid-XXX-123 to uid-col-123."
+    }
+  },
+
+  "stamp": {
+    "id": "{id}",
+    "_stamp_note": "Dotted JSON paths to write the ID into. Integers index lists: 'price1.product.products.0'. Use '{id:cus-}' to swap the leading prefix for a sibling ID."
+  }
+}
