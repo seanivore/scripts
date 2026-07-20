@@ -96,6 +96,7 @@ while [[ $# -gt 0 ]]; do
     -y|--yes) ASSUME_YES=1; shift ;;
     -d|--dry) DRY_RUN=1; shift ;;
     -h|--help) show_help; exit 0 ;;
+    --version) echo "filemgmt $VERSION"; exit 0 ;;
     -*) echo "Unknown flag $1" >&2; show_help; exit 2 ;;
     *) # If it's a loose argument, let's complain for now to enforce strict usage
        echo "Unexpected argument: $1" >&2; exit 2 ;;
