@@ -12,8 +12,7 @@ Shared terminal commands. **This repo is the single source of truth** — every 
 | `token` | Estimate token count of text, a file, or a repo | `token .` |
 | `clearpy` | Delete caches and temp files (`__pycache__`, `.DS_Store`, …) | `clearpy -n` |
 | `ptree` | Project tree with hidden-file control | `ptree -s` |
-| `filemgmt` | Propagate one canonical doc across every project | `filemgmt -f ~/Development -r <path>/.agents/DEV_RULES.md` |
-| `gate` | Gap-review courier engine (Claude Agent SDK) | `gate <IMPLEMENT-path> --dry-run` |
+| `filemgmt` | Propagate one canonical doc across every project | `filemgmt -f ~/Development -r <path>/BRAND.md` |
 
 Every command supports `--help` and `--version`.
 
@@ -35,7 +34,7 @@ export PATH="$PATH:$HOME/bin"
 
 To reinstall a single command, run its own installer (`uid/install_uid_commands.sh`, `token/install_token_command.sh`, and so on).
 
-**Prerequisites:** `python3` for `uid`/`mkid`/`token`, `tree` for `ptree` (`brew install tree`), Node + `npm install` inside `gate/` for `gate`.
+**Prerequisites:** `python3` for `uid`/`mkid`/`token`, `tree` for `ptree` (`brew install tree`).
 
 ---
 
@@ -161,22 +160,12 @@ ptree -a -L 2 ~/proj
 Propagates one canonical file across every project directory.
 
 ```bash
-filemgmt -f ~/Development -r ~/Development/_planner/.agents/DEV_RULES.md   # replace everywhere
+filemgmt -f ~/Development -r ~/Development/_planner/assets/docs/BRAND.md  # replace everywhere
 filemgmt -f ~/Development -a <path>/NEW_SHARED_DOC.md                     # add a new shared file
 filemgmt -f ~/Development -r <path>/BRAND.md -d                           # dry run
 ```
 
-`-r` overwrites every same-named file it finds; it also adds the file where the target directory matches the canonical's parent (which is how new projects pick up `.agents/` docs). Prunes `.git`, `node_modules`, `dist`, `build`, `.next`, `.venv`. No backups — it relies on git for safety.
-
-## `gate`
-
-The gap-review courier engine — spawns peer Claude reviewers via the Agent SDK to run the DEV_RULES gap-review loop. Substantial enough to have its own docs: see [`gate/README.md`](gate/README.md) and [`gate/NEXT_UPDATE.md`](gate/NEXT_UPDATE.md) for status.
-
-```bash
-gate <IMPLEMENT-path> --dry-run    # resolve, parse, report — spawns nothing, no spend
-```
-
-Requires `npm install` inside `gate/`.
+`-r` overwrites every same-named file it finds; it also adds the file where the target directory matches the canonical's parent. **Note:** this is no longer used for the development protocol — that lives as one global copy at `~/.agents/` and is never distributed. Prunes `.git`, `node_modules`, `dist`, `build`, `.next`, `.venv`. No backups — it relies on git for safety.
 
 ---
 
@@ -188,6 +177,6 @@ Read **[`SCRIPT_STANDARD.md`](SCRIPT_STANDARD.md)** first. It is the build stand
 
 `~/bin` is a single flat namespace, so a command is inherently global — there is no coherent way for `project` to mean one thing in one repo and something else in another. What *is* per-project is the **data** a command operates on, and that belongs in a config file inside the project repo.
 
-`gate` already works this way: a global command here, reading `<repo>/.agents/GATE_NOTES.md` for per-project configuration. New commands should follow it.
+`entry` works this way: a global command here, reading `<repo>/.agents/entry.json` for per-project configuration. New commands should follow it.
 
 The alternative was tried and failed. `uid` began life inside one project, got copied into others, and ended up with four byte-identical copies scattered across repos — none of which actually worked, while the real implementation sat in a retired repo that nothing tracked.

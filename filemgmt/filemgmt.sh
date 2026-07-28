@@ -39,8 +39,8 @@ Examples:
   # Add a new file to all .agent directories:
   filemgmt -f ~/Development/*/.agent -a ~/Development/thot/.agent/RESEARCH_PROTOCOL.md
 
-  # Replace DEV_RULES.md everywhere it's found inside ~/Development:
-  filemgmt -f ~/Development -r ~/Development/thot/.agent/DEV_RULES.md
+  # Replace a shared doc everywhere it's found inside ~/Development:
+  filemgmt -f ~/Development -r ~/Development/_planner/assets/docs/BRAND.md
 EOF
 }
 

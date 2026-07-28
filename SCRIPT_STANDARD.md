@@ -18,7 +18,7 @@ The original five-step version, kept because it is still the fastest way to desc
 | 4. Make script executable | `chmod +x ~/bin/command-name.sh` |
 | 5. Run the script | `command-name.sh` |
 
-**What changed since:** commands are no longer authored directly in `~/bin`. They live here in `~/Development/scripts`, under version control, and an installer places a shim in `~/bin`. Otherwise the machine is the only copy — which is exactly how `~/bin/gate`, the sole entry point to a 1,400-line engine, ended up tracked nowhere at all.
+**What changed since:** commands are no longer authored directly in `~/bin`. They live here in `~/Development/scripts`, under version control, and an installer places a shim in `~/bin`. Otherwise the machine is the only copy — which is exactly how the `gate` launcher — at the time the sole entry point to a 1,400-line engine — once ended up tracked nowhere at all. (`gate` itself was retired in July 2026; the lesson is why this repo exists.)
 
 ---
 
