@@ -36,8 +36,8 @@ Flags:
   -h, --help   Show this help and exit.
 
 Examples:
-  # Add a new file to all .agent directories:
-  filemgmt -f ~/Development/*/.agent -a ~/Development/thot/.agent/RESEARCH_PROTOCOL.md
+  # Add a new file to every project's assets/docs directory:
+  filemgmt -f ~/Development/*/assets/docs -a ~/Development/_planner/assets/docs/BRAND.md
 
   # Replace a shared doc everywhere it's found inside ~/Development:
   filemgmt -f ~/Development -r ~/Development/_planner/assets/docs/BRAND.md
